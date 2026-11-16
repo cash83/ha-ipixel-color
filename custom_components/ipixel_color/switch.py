@@ -39,14 +39,14 @@ async def async_setup_entry(
     ])
 
 
-class iPIXELSwitch(SwitchEntity):
+class iPIXELSwitch(SwitchEntity, RestoreEntity):
     """Representation of an iPIXEL Color switch."""
 
     def __init__(
-        self, 
-        api: iPIXELAPI, 
-        entry: ConfigEntry, 
-        address: str, 
+        self,
+        api: iPIXELAPI,
+        entry: ConfigEntry,
+        address: str,
         name: str
     ) -> None:
         """Initialize the switch."""
@@ -56,7 +56,7 @@ class iPIXELSwitch(SwitchEntity):
         self._name = name
         self._attr_name = name
         self._attr_unique_id = f"{address}_power"
-        self._is_on = False
+        self._is_on = True
         self._available = True
 
         # Device info for grouping in device registry
@@ -67,6 +67,17 @@ class iPIXELSwitch(SwitchEntity):
             model="LED Matrix Display",
             sw_version="1.0",
         )
+
+    async def async_added_to_hass(self) -> None:
+        """Ripristina lo stato di accensione dopo un riavvio."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state is not None and last_state.state in ("on", "off"):
+            self._is_on = last_state.state == "on"
+            # Allinea anche lo stato interno dell'API, così async_update
+            # non lo riporta a "off" al primo giro
+            self._api._power_state = self._is_on
+            _LOGGER.debug("Restored power state: %s", self._is_on)
 
     @property
     def is_on(self) -> bool:

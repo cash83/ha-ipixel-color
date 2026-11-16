@@ -1,5 +1,13 @@
 # Changelog
 
+## Fork cash83 — v0.6.0 (16/11/2026)
+
+Pannello laterale completo (anteprima fedele, composizione a caselle con
+grandezza/posizione per casella, 13 stili di orologio italiano, scritta
+libera, icone MDI/emoji, scaletta della rotazione, galleria, disegno in
+diretta, libreria personale) + comandi nativi del firmware (cronometro,
+segnapunti, accensione programmata, equalizzatore, slot di memoria) e
+client BLE indurito. Dettagli nel README.
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),

@@ -20,6 +20,13 @@ def get_font_locations() -> list[Path]:
     """
     locations = []
 
+    # 0 priority: la cartella dell'utente (/config/fonts), che
+    # sopravvive agli aggiornamenti dell'integrazione
+    user_fonts_dir = Path(__file__).parent.parent.parent / "fonts"
+    if user_fonts_dir.exists() and user_fonts_dir.is_dir():
+        locations.append(user_fonts_dir)
+        _LOGGER.debug("Added user fonts directory: %s", user_fonts_dir)
+
     # 1st priority: Custom fonts from this integration
     custom_fonts_dir = Path(__file__).parent / "fonts"
     if custom_fonts_dir.exists() and custom_fonts_dir.is_dir():

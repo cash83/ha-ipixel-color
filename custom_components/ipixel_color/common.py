@@ -1,6 +1,7 @@
 """Common utilities for iPIXEL Color integration."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.template import Template
@@ -113,6 +114,73 @@ async def update_ipixel_display(hass: HomeAssistant, device_name: str, api, text
         True if update was successful
     """
     try:
+        # Un aggiornamento esplicito della composizione riprende il
+        # controllo del display da un contenuto una-tantum: via il blocco
+        # e via anche un eventuale timer/orologio del server in corso.
+        for _entry in hass.config_entries.async_entries(DOMAIN):
+            if _entry.data.get("address", "").lower() == api._address.lower():
+                _timers = hass.data.get(f"{DOMAIN}_timers", {})
+                _stored = _timers.get(_entry.entry_id)
+                # Se a chiamare è il task stesso (es. la rotazione che
+                # rimanda i sensori), non deve auto-cancellarsi né
+                # togliersi il blocco
+                if _stored is not asyncio.current_task():
+                    hass.data.setdefault(f"{DOMAIN}_override", set()).discard(
+                        _entry.entry_id
+                    )
+                    if _stored:
+                        _timers.pop(_entry.entry_id, None)
+                        hass.data.get(f"{DOMAIN}_timer_mode", {}).pop(
+                            _entry.entry_id, None
+                        )
+                        _stored.cancel()
+                        # La composizione ha ripreso il display: senza
+                        # questo, al riavvio ripartirebbe la rotazione o
+                        # l'orologio appena soppiantati
+                        if _entry.options.get("display_owner") in (
+                            "rotation", "clock_it",
+                        ):
+                            _opts = dict(_entry.options)
+                            _opts["display_owner"] = "composition"
+                            hass.config_entries.async_update_entry(
+                                _entry, options=_opts
+                            )
+                break
+
+        # A saved composition (built in the panel) wins over the raw
+        # text entity: no Jinja knowledge needed from the user.
+        segments = None
+        if text is None:
+            from .composition import (
+                OPTION_KEY,
+                build_segments,
+                build_text,
+                has_custom_segments,
+            )
+            for entry in hass.config_entries.async_entries(DOMAIN):
+                if entry.data.get("address", "").lower() == api._address.lower():
+                    items = entry.options.get(OPTION_KEY) or []
+                    if items:
+                        sep = " " * int(entry.options.get("comp_sep", 2))
+                        text = build_text(hass, items, separator=sep)
+                        if has_custom_segments(items):
+                            # Qualche casella ha grandezza/posizione sue:
+                            # percorso a segmenti (blocchi assemblati da noi)
+                            color = get_color_from_light_entity(
+                                hass, api._address, "text_color", default="ffffff"
+                            ) or "ffffff"
+                            fs = await _get_entity_setting(
+                                hass, device_name, "number", "font_size",
+                                float, api._address,
+                            )
+                            segments = build_segments(
+                                hass, items, sep,
+                                default_color=color,
+                                default_size=int(fs) if fs else None,
+                            )
+                        _LOGGER.debug("Composition text: %s", text)
+                    break
+
         # Get current mode
         mode = await _get_entity_setting(hass, device_name, "select", "mode_select", str, api._address)
         if not mode:
@@ -124,7 +192,7 @@ async def update_ipixel_display(hass: HomeAssistant, device_name: str, api, text
         if mode == MODE_TEXT_IMAGE:
             return await _update_textimage_mode(hass, device_name, api, text)
         elif mode == MODE_TEXT:
-            return await _update_text_mode(hass, device_name, api, text)
+            return await _update_text_mode(hass, device_name, api, text, segments)
         elif mode == MODE_CLOCK:
             return await _update_clock_mode(hass, device_name, api)
         else:
@@ -248,7 +316,9 @@ async def _update_clock_mode(hass: HomeAssistant, device_name: str, api) -> bool
         return False
 
 
-async def _update_text_mode(hass: HomeAssistant, device_name: str, api, text: str = None) -> bool:
+async def _update_text_mode(
+    hass: HomeAssistant, device_name: str, api, text: str = None, segments=None
+) -> bool:
     """Update display in text mode using pypixelcolor.
 
     Args:
@@ -272,16 +342,13 @@ async def _update_text_mode(hass: HomeAssistant, device_name: str, api, text: st
 
         # Get pypixelcolor text settings (reusing existing entities where possible)
 
-        # Reuse existing font selector - convert TTF filename to full path
-        font_name = await _get_entity_setting(hass, device_name, "select", "font_select", str, api._address)
-        if font_name and font_name.endswith(('.ttf', '.otf')):
-            # Custom TTF/OTF font from fonts/ folder
-            from pathlib import Path
-            font_path = Path(__file__).parent / "fonts" / font_name
-            font = str(font_path) if font_path.exists() else "CUSONG"
-        else:
-            # Use pypixelcolor's built-in fonts or default
-            font = "CUSONG"
+        # Font resolution (missing files fall back inside the API)
+        font = await _get_entity_setting(hass, device_name, "select", "font_select", str, api._address)
+
+        # Altezza di rendering del carattere: riusa il number "font_size"
+        # (0 = automatico, cioe' l'altezza del pannello)
+        font_size = await _get_entity_setting(hass, device_name, "number", "font_size", float, api._address)
+        char_height = int(font_size) if font_size else None
 
         # Get background color from light entity
         bg_color = get_color_from_light_entity(hass, api._address, "background_color", default=None)
@@ -323,20 +390,33 @@ async def _update_text_mode(hass: HomeAssistant, device_name: str, api, text: st
             _LOGGER.debug("Reconnecting to device for text mode update")
             await api.connect()
 
-        # Resolve templates and process escape sequences
-        template_resolved = await resolve_template_variables(hass, text)
-        processed_text = template_resolved.replace('\\n', '\n').replace('\\t', '\t')
+        if segments:
+            # Grandezze/posizioni per casella: blocchi assemblati da noi
+            processed_text = text or "(segmenti)"
+            success = await api.display_text_segments(
+                segments,
+                font=font,
+                bg_color=bg_color,
+                animation=animation,
+                speed=speed,
+                rainbow_mode=rainbow_mode,
+            )
+        else:
+            # Resolve templates and process escape sequences
+            template_resolved = await resolve_template_variables(hass, text)
+            processed_text = template_resolved.replace('\\n', '\n').replace('\\t', '\t')
 
-        # Send text using pypixelcolor
-        success = await api.display_text_pypixelcolor(
-            text=processed_text,
-            color=color,
-            bg_color=bg_color,
-            font=font,
-            animation=animation,
-            speed=speed,
-            rainbow_mode=rainbow_mode
-        )
+            # Send text using pypixelcolor
+            success = await api.display_text_pypixelcolor(
+                text=processed_text,
+                color=color,
+                bg_color=bg_color,
+                font=font,
+                animation=animation,
+                speed=speed,
+                rainbow_mode=rainbow_mode,
+                char_height=char_height,
+            )
 
         if success:
             _LOGGER.info("Text mode update successful: %s (color=#%s, bg=%s, font=%s, anim=%d, speed=%d)",

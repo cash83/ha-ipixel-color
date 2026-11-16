@@ -1,141 +1,72 @@
-# iPIXEL Color - Home Assistant Integration
+# iPIXEL Color – integrazione Home Assistant (fork cash83)
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/A4747U9)
+Fork di [cagcoach/ha-ipixel-color](https://github.com/cagcoach/ha-ipixel-color)
+per i display LED a matrice "iPixel Color" (BLE, es. pannelli 64×16 venduti
+anche come B.K. Light LED Pixel Board). *English: this is a heavily extended
+fork of the upstream integration; the panel UI is in Italian.*
 
-A Home Assistant custom integration for iPIXEL Color LED matrix displays via Bluetooth.
-These displays have been recently available as B.K. Light LED Pixel Board from Action and thus get increasing popularity.
+## Cosa aggiunge questo fork
 
-## Features
+**Pannello laterale "iPixel"** completo (tema neon, anteprima dal vivo che
+rispecchia il display fisico, pixel per pixel):
 
-- **Multiple Display Modes**: Text Image (PIL rendering), Native Text, and Clock modes
-- **RGB Color Support**: Separate text and background colors via RGB light entities
-- **Clock Display**: 9 different clock styles with automatic time synchronization
-- **Rich Text Display**: Custom fonts, sizes, multiline text with `\n`, antialiasing
-- **Template Support**: Use Home Assistant variables like `{{ states('sensor.temperature') }}°C`
-- **Font Management**: Load TTF/OTF fonts from `fonts/` folder
-- **Brightness Control**: Adjustable display brightness (1-100)
-- **Auto/Manual Updates**: Choose automatic updates or manual refresh
-- **State Persistence**: Settings preserved across HA restarts
-- **Bluetooth Proxy Support**: Compatible with Bluetooth proxy devices
-- **Auto-discovery**: Finds iPIXEL devices automatically via Bluetooth
+- **Composizione a caselle**: sensori e testi trascinabili, icona emoji
+  automatica per tipo di sensore, unità di misura, decimali, e
+  **grandezza/posizione verticale PER CASELLA** nella riga che scorre
+  (ogni blocco del protocollo viaggia con la sua bitmap e il suo colore).
+- **12+1 stili di orologio italiano** disegnati dal server (due righe, cifre
+  grandi, binario, sole/luna, fiamme, cielo stellato, ora a parole, ora+icona
+  MDI o emoji…), con data e anno.
+- **Scritta libera posizionabile**: testo e/o valore di un'entità come
+  immagine, con grandezza, posizione, scorrimento a velocità libera (anche
+  più lenta del minimo del firmware).
+- **Icone**: Material Design (per nome) o **emoji Twemoji**, con grandezza,
+  posizione e scorrimento; emoji anche dentro il testo scorrevole.
+- **Rotazione automatica con scaletta**: decidi tu i passi
+  (sensori / immagini / orologio), l'ordine e la durata di ciascuno;
+  la scaletta si rilegge a ogni giro.
+- **Galleria** delle animazioni originali dell'app + libreria personale,
+  **Disegno** pixel-art con modalità **in diretta** (fun mode + set_pixel),
+  **Timer**, **Da internet** (GIF/immagini/video→GIF via ffmpeg).
+- **Comandi nativi del firmware**: cronometro di bordo (conta da solo, zero
+  BLE), tabellone segnapunti, **accensione/spegnimento programmati scritti
+  nel display** (funzionano anche con HA spento), equalizzatore, **memoria
+  del display** (slot di bordo: salva e richiama con 7 byte).
+- **"Libera per l'app"**: lascia il BLE all'app del telefono per 10 minuti
+  e si riaggancia da solo.
 
-## Installation
+Sotto il cofano: client BLE con ritrasmissione e riconnessione, blocco delle
+animazioni 3/4 (bootloop sui pannelli non 32×32), emoji ridimensionate dentro
+i blocchi 16×16 del protocollo, aggiornamenti automatici con anti-riavvio
+dello scorrimento (minimo 30 s tra ri-invii), ripristino del contenuto dopo
+i riavvii di Home Assistant.
 
-### HACS (Recommended)
+## Installazione (HACS)
 
-1. Open HACS in Home Assistant
-2. Click on the three dots in the top right corner
-3. Select **Custom repositories**
-4. Add the repository URL: `https://github.com/cagcoach/ha-ipixel-color`
-5. Select **Integration** as the category
-6. Click **Add**
-7. Search for "iPIXEL Color" in HACS and install it
-8. Restart Home Assistant
-9. Add the integration via Settings → Devices & Services → Add Integration
+1. HACS → ⋮ → **Repository personalizzati**
+2. URL: `https://github.com/cash83/ha-ipixel-color` — categoria **Integration**
+3. Installa "iPIXEL Color", riavvia Home Assistant
+4. Il display viene trovato da solo via Bluetooth (nome `LED_BLE_*`);
+   il pannello "iPixel" compare nella barra laterale.
 
-### Manual Installation
+## Requisiti
 
-1. Copy `custom_components/ipixel_color` to your HA `custom_components` directory
-2. Restart Home Assistant
-3. Add integration via Settings → Devices & Services → Add Integration
+- Home Assistant 2025.1+ con Bluetooth (adattatore locale consigliato:
+  via proxy ESPHome i pacchetti grandi possono perdersi)
+- Dipendenze Python installate da HA: `pypixelcolor >=0.4,<0.5`, `pillow`,
+  `bleak`, `bleak-retry-connector`, `resvg_py`
 
-### Optional: Custom Fonts
+## Crediti
 
-Place `.ttf`/`.otf` font files in the `fonts/` folder within the integration directory for additional font options.
+- [cagcoach](https://github.com/cagcoach/ha-ipixel-color) — integrazione originale
+- [lucagoc/pypixelcolor](https://github.com/lucagoc/pypixelcolor) — libreria del protocollo
+- ahzs645, tigers75, CzarofAK, nielsmaerten, scyto — ricerche sul protocollo
+  e idee riprese nei rispettivi fork
+- Twemoji (CC-BY 4.0) per le emoji, Material Design Icons per le icone
 
-## Entities
+## Avvertenze
 
-Once configured, you'll get these entities:
-
-**Display Control:**
-- `select.{device}_mode` - Display mode (textimage, text, clock)
-- `text.{device}_display` - Enter text with templates and `\n` for newlines
-- `switch.{device}_power` - Turn display on/off
-- `number.{device}_brightness` - Display brightness level (1-100)
-
-**Text Appearance:**
-- `select.{device}_font` - Choose from available fonts
-- `number.{device}_font_size` - Font size (0=auto, supports decimals like 12.5)
-- `number.{device}_line_spacing` - Spacing between lines (0-20px)
-- `switch.{device}_antialiasing` - Smooth vs sharp text
-- `light.{device}_text_color` - RGB text color
-- `light.{device}_background_color` - RGB background color
-
-**Clock Mode:**
-- `select.{device}_clock_style` - Clock style (0-8)
-- `switch.{device}_clock_24h_format` - 24-hour time format
-- `switch.{device}_clock_show_date` - Show date below time
-
-**Update Control:**
-- `switch.{device}_auto_update` - Auto-update on changes
-- `button.{device}_update_display` - Manual refresh
-
-**Device Info:**
-- `sensor.{device}_width` - Display width in pixels
-- `sensor.{device}_height` - Display height in pixels
-- `sensor.{device}_device_type` - Device model information
-
-## Template Examples
-
-```jinja2
-Time: {{ now().strftime('%H:%M') }}
-Temp: {{ states('sensor.temperature') | round(1) }}°C
-{% if is_state('sun.sun', 'above_horizon') %}Day{% else %}Night{% endif %}
-```
-
-## Quick Start
-
-**Text Mode:**
-1. Select mode: `textimage` (for RGB colors) or `text` (native)
-2. Set text: `"Hello\nWorld"`
-3. Choose text and background colors using light entities
-4. Select font and size (or use auto-sizing)
-5. Toggle auto-update ON or use manual update button
-
-**Clock Mode:**
-1. Select mode: `clock`
-2. Choose clock style (0-8)
-3. Set 24-hour format and date display preferences
-4. Time syncs automatically
-
-**Templates:**
-- Templates update automatically with sensor changes when auto-update is ON
-
-## Font Management
-
-- Place `.ttf`/`.otf` files in `fonts/` folder
-- Restart HA to see new fonts in dropdown
-- Recommended: pixel fonts like 5x5.ttf, 7x7.ttf
-
-## Troubleshooting
-
-- Enable debug logging: `custom_components.ipixel_color: debug`
-- Check auto-update is ON or use manual update button
-- Verify templates in Developer Tools → Template
-- Ensure device is in Bluetooth range
-
-## Status
-
-| Feature | Status |
-|---------|--------|
-| ✅ Text Display (3 modes) | Complete |
-| ✅ RGB Colors | Complete |
-| ✅ Clock Mode (9 styles) | Complete |
-| ✅ Custom Fonts | Complete |
-| ✅ Templates | Complete |
-| ✅ State Persistence | Complete |
-| ✅ Brightness Control | Complete |
-| 🔄 GIF Animations | Planned |
-| 🔄 Animated Variable-Width Fonts | Planned |
-
-## Technical
-
-- Requires: Home Assistant 2024.1+ and HACS
-
-## Acknowledgments
-
-Special thanks to the authors of [pypixelcolor](https://github.com/lucagoc/pypixelcolor) for their excellent library that powers the core functionality of this integration. Their work in reverse-engineering the iPIXEL protocol has been invaluable.
-
-## License
-
-This project is licensed under the GNU General Public License v3.0 - see the LICENSE file for details.
+- Il comando di cancellazione ROM del firmware **non è esposto da nessuna
+  parte**, di proposito: cancella tutto, impostazioni comprese.
+- Le animazioni testo "scorri su/giù" sono bloccate sui pannelli non 32×32:
+  mandano il display in bootloop (documentato dalla community).

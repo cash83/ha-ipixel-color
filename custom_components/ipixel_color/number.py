@@ -270,7 +270,7 @@ class iPIXELTextAnimation(NumberEntity, RestoreEntity):
 
     _attr_mode = NumberMode.BOX
     _attr_native_min_value = 0
-    _attr_native_max_value = 7
+    _attr_native_max_value = 8  # 8 = laser; 3 e 4 sono bloccati in api.py
     _attr_native_step = 1
     _attr_icon = "mdi:animation"
 
@@ -328,11 +328,15 @@ class iPIXELTextAnimation(NumberEntity, RestoreEntity):
         try:
             from .common import update_ipixel_display
 
-            mode_entity_id = f"select.{self._name.lower().replace(' ', '_')}_mode"
+            mode_entity_id = get_entity_id_by_unique_id(
+                self.hass, self._address, "mode_select", "select"
+            )
             mode_state = self.hass.states.get(mode_entity_id) if mode_entity_id else None
 
             if mode_state and mode_state.state == "text":
-                auto_update_entity_id = f"switch.{self._name.lower().replace(' ', '_')}_auto_update"
+                auto_update_entity_id = get_entity_id_by_unique_id(
+                    self.hass, self._address, "auto_update", "switch"
+                )
                 auto_update_state = self.hass.states.get(auto_update_entity_id) if auto_update_entity_id else None
 
                 if auto_update_state and auto_update_state.state == "on":
@@ -409,11 +413,15 @@ class iPIXELTextSpeed(NumberEntity, RestoreEntity):
         try:
             from .common import update_ipixel_display
 
-            mode_entity_id = f"select.{self._name.lower().replace(' ', '_')}_mode"
+            mode_entity_id = get_entity_id_by_unique_id(
+                self.hass, self._address, "mode_select", "select"
+            )
             mode_state = self.hass.states.get(mode_entity_id) if mode_entity_id else None
 
             if mode_state and mode_state.state == "text":
-                auto_update_entity_id = f"switch.{self._name.lower().replace(' ', '_')}_auto_update"
+                auto_update_entity_id = get_entity_id_by_unique_id(
+                    self.hass, self._address, "auto_update", "switch"
+                )
                 auto_update_state = self.hass.states.get(auto_update_entity_id) if auto_update_entity_id else None
 
                 if auto_update_state and auto_update_state.state == "on":
@@ -490,11 +498,15 @@ class iPIXELTextRainbow(NumberEntity, RestoreEntity):
         try:
             from .common import update_ipixel_display
 
-            mode_entity_id = f"select.{self._name.lower().replace(' ', '_')}_mode"
+            mode_entity_id = get_entity_id_by_unique_id(
+                self.hass, self._address, "mode_select", "select"
+            )
             mode_state = self.hass.states.get(mode_entity_id) if mode_entity_id else None
 
             if mode_state and mode_state.state == "text":
-                auto_update_entity_id = f"switch.{self._name.lower().replace(' ', '_')}_auto_update"
+                auto_update_entity_id = get_entity_id_by_unique_id(
+                    self.hass, self._address, "auto_update", "switch"
+                )
                 auto_update_state = self.hass.states.get(auto_update_entity_id) if auto_update_entity_id else None
 
                 if auto_update_state and auto_update_state.state == "on":

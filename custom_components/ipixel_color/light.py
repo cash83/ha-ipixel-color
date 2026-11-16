@@ -102,6 +102,14 @@ class iPIXELColorLight(LightEntity, RestoreEntity):
                 self._attr_brightness = last_state.attributes[ATTR_BRIGHTNESS]
                 _LOGGER.debug("Restored %s brightness: %d", self._light_name.lower(), self._attr_brightness)
 
+        # Il colore del TESTO non deve mai ripartire spento: testo nero
+        # su sfondo nero = display che sembra morto
+        if getattr(self, "_never_off", False) and not self._attr_is_on:
+            self._attr_is_on = True
+            if not self._attr_rgb_color or self._attr_rgb_color == (0, 0, 0):
+                self._attr_rgb_color = self._default_rgb
+            _LOGGER.debug("%s forzato acceso al ripristino", self._light_name)
+
     @property
     def is_on(self) -> bool:
         """Return true if light is on."""
@@ -189,6 +197,7 @@ class iPIXELTextColorLight(iPIXELColorLight):
     _entity_suffix = "text_color"
     _default_rgb = (255, 255, 255)  # White
     _trigger_modes = ["text", "textimage"]
+    _never_off = True  # testo spento = invisibile: mai al ripristino
 
 
 class iPIXELBackgroundColorLight(iPIXELColorLight):

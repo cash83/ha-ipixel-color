@@ -162,6 +162,58 @@ def render_text_to_png(text: str, width: int, height: int, antialias: bool = Tru
     return png_buffer.getvalue()
 
 
+def render_text_sprite(
+    text: str,
+    height_px: int,
+    color_hex: str = "ffffff",
+    font_name: str | None = None,
+) -> Image.Image:
+    """Scritta ritagliata ai suoi bordi, come "sprite" RGBA trasparente.
+
+    Serve alla scritta libera del pannello: l'immagine viene poi
+    appoggiata sul canvas del display (posizionata o fatta scorrere)
+    con compose_icon_media, esattamente come le icone.
+
+    Args:
+        text: La scritta (una riga).
+        height_px: Altezza voluta dei caratteri in pixel.
+        color_hex: Colore della scritta ('ffffff' o '#ffffff').
+        font_name: Font della cartella fonts/, o None per il default.
+
+    Returns:
+        PIL Image RGBA larga quanto la scritta, trasparente intorno.
+    """
+    # Sovracampionato: disegnato 4 volte piu' grande e poi ridotto con
+    # LANCZOS + soglia. Disegnare il TTF direttamente a 8 px impastava
+    # le lettere (la B non si distingueva dalla A).
+    ss = 4
+    font_obj = get_fixed_font(float(height_px * ss), font_name or "7x5.ttf")
+
+    # Canvas provvisorio abbondante: poi si ritaglia al contenuto
+    est_w = max(8, len(text) * height_px * ss * 2 + 16)
+    tmp = Image.new("L", (est_w, height_px * ss * 3 + 16), 0)
+    d = ImageDraw.Draw(tmp)
+    d.text((4, 4), text, font=font_obj, fill=255)
+
+    bbox = tmp.getbbox()
+    if not bbox:
+        return Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+    tmp = tmp.crop(bbox)
+
+    try:
+        r, g, b = hex_to_rgb(color_hex.lstrip("#"))
+    except (ValueError, IndexError):
+        r, g, b = 255, 255, 255
+
+    # Riduzione all'altezza esatta + soglia netta: i LED o accesi o spenti
+    new_w = max(1, round(tmp.width * height_px / tmp.height))
+    small = tmp.resize((new_w, height_px), Image.LANCZOS)
+    mask = small.point(lambda v: 255 if v >= 110 else 0)
+    sprite = Image.new("RGBA", mask.size, (0, 0, 0, 0))
+    sprite.paste(Image.new("RGBA", mask.size, (r, g, b, 255)), (0, 0), mask)
+    return sprite
+
+
 def _calculate_content_bounds(img: Image.Image) -> tuple[int, int, int, int] | None:
     """Calculate actual content bounds by analyzing pixels.
     
