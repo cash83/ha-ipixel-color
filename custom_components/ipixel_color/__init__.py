@@ -17,7 +17,7 @@ from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import config_validation as cv, entity_registry as er
 from homeassistant.helpers.event import async_track_state_change_event, async_call_later
 from homeassistant.components import panel_custom, frontend, websocket_api
-from homeassistant.components.http import StaticPathConfig
+from homeassistant.components.http import StaticPathConfig, HomeAssistantView
 
 from .api import iPIXELAPI, iPIXELConnectionError, iPIXELTimeoutError
 from .composition import OPTION_KEY, composition_entity_ids
@@ -428,8 +428,14 @@ async def _timer_loop(hass: HomeAssistant, entry_id: str, mode: str, seconds: in
     async def _frame(style: str, now, show_date: bool) -> None:
         temp = _temp_text() if style == "f" else None
         icon = await _clock_icon() if style == "o" else None
+        e2 = hass.config_entries.async_get_entry(entry_id)
+        size = str((e2.options.get("clock_size") if e2 else "") or "m")
+        try:
+            gap = int((e2.options.get("clock_gap") if e2 else 2))
+        except (TypeError, ValueError):
+            gap = 2
         data, ext = await hass.async_add_executor_job(
-            cs.render, style, now, _color_rgb(), temp, show_date, icon
+            cs.render, style, now, _color_rgb(), temp, show_date, icon, size, gap
         )
         await api.display_image(data, ext, "crop")
 
@@ -446,16 +452,17 @@ async def _timer_loop(hass: HomeAssistant, entry_id: str, mode: str, seconds: in
         now = dt_util.now()
         style = _style()
         if style == "a":
-            await show(f"{giorni[now.weekday()]} {now:%H:%M}")
+            # Stile A: ora lo disegna clock_styles (giorno a lettere + ora
+            # in font bitmap COMPATTO), non piu' il testo a tutta altezza
+            # di pypixelcolor — cosi' i numeri sono piu' piccoli e il
+            # giorno ("MA", "GI"...) si vede.
+            await _frame("a", now, False)
             if _show_date_on():
-                # ultimi ~10 secondi del minuto: data in italiano
+                # ultimi ~10 secondi del minuto: data
                 await asyncio.sleep(_nap(max(1, 51 - now.second)))
                 if deadline is not None and _time.monotonic() >= deadline:
                     return
-                now2 = dt_util.now()
-                # Con l'anno sono 8 caratteri esatti: il giorno
-                # della settimana resta nella schermata dell'ora
-                await show(f"{now2:%d/%m/%y}")
+                await _frame("a", dt_util.now(), True)
                 await asyncio.sleep(_nap(max(1, 61 - dt_util.now().second)))
             else:
                 await asyncio.sleep(_nap(max(1, 61 - now.second)))
@@ -898,6 +905,97 @@ async def _ws_display_url(hass, connection, msg) -> None:
         result["preview"] = base64.b64encode(data).decode()
         result["preview_ext"] = ext.lstrip(".")
     connection.send_result(msg["id"], result)
+
+
+class IpixelUploadView(HomeAssistantView):
+    """Upload HTTP di un'immagine/GIF/video dal pannello al display.
+
+    Il WebSocket di HA accetta messaggi fino a 4 MiB: troppo poco per una
+    GIF del telefono mandata in base64 (che la gonfia di 4/3). Il body HTTP
+    arriva invece a 16 MiB, e qui passano i byte GREZZI del file, senza
+    gonfiarli. Stessa logica del canale "da URL", ma con i byte caricati.
+    """
+
+    url = "/api/ipixel_color/upload"
+    name = "api:ipixel_color:upload"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        """Tiene l'istanza hass: su HA recenti request.app non e' piu'
+        indicizzato dalla stringa 'hass' ma da un AppKey."""
+        self.hass = hass
+
+    async def post(self, request):
+        from aiohttp import web
+
+        hass = self.hass
+        data = await request.read()
+        if not data:
+            return web.json_response({"error": "corpo vuoto"}, status=400)
+        if len(data) > 15 * 1024 * 1024:
+            return web.json_response({"error": "file oltre 15 MB"}, status=413)
+
+        address = request.query.get("address")
+        resize_method = request.query.get("resize_method", "crop")
+        if resize_method not in ("crop", "fit"):
+            resize_method = "crop"
+        try:
+            slot = int(request.query.get("save_slot", "0"))
+        except (TypeError, ValueError):
+            slot = 0
+
+        try:
+            entry = _find_entry(hass, address)
+        except HomeAssistantError as err:
+            return web.json_response({"error": str(err)}, status=404)
+
+        # Estensione dai magic bytes (come il canale da URL)
+        if data[:6] in (b"GIF87a", b"GIF89a"):
+            ext = ".gif"
+        elif data[:8] == b"\x89PNG\r\n\x1a\n":
+            ext = ".png"
+        elif data[:3] == b"\xff\xd8\xff":
+            ext = ".jpg"
+        elif len(data) > 8 and data[4:8] == b"ftyp":
+            ext = ".mp4"
+        elif data[:4] == b"\x1aE\xdf\xa3":
+            ext = ".webm"
+        else:
+            return web.json_response(
+                {"error": "formato non riconosciuto (serve PNG/JPG/GIF/MP4/WEBM)"},
+                status=415,
+            )
+
+        api = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        if not api:
+            return web.json_response({"error": "dispositivo non pronto"}, status=503)
+
+        _cancel_timer(hass, entry.entry_id)
+        try:
+            data, ext = await _maybe_video_to_gif(hass, api, data, ext)
+        except HomeAssistantError as err:
+            return web.json_response({"error": str(err)}, status=422)
+
+        ok = await api.display_image(
+            image_bytes=data, file_extension=ext,
+            resize_method=resize_method, save_slot=slot,
+        )
+        if ok:
+            _set_override(hass, entry.entry_id)
+            await hass.async_add_executor_job(
+                Path(_last_image_path(hass, entry.entry_id)).write_bytes, data
+            )
+            await hass.async_add_executor_job(_save_to_library, hass, data, ext)
+            _remember_owner(
+                hass, entry, "image",
+                last_ext=ext, last_resize=resize_method,
+            )
+
+        result = {"displayed": ok, "bytes": len(data), "ext": ext}
+        if ok and len(data) <= 400 * 1024:
+            result["preview"] = base64.b64encode(data).decode()
+            result["preview_ext"] = ext.lstrip(".")
+        return web.json_response(result)
 
 
 @websocket_api.websocket_command(
@@ -1414,6 +1512,11 @@ async def _ws_frame(hass, connection, msg) -> None:
         ),
         vol.Optional("icon"): cv.string,
         vol.Optional("icon_color"): cv.string,
+        vol.Optional("size"): vol.Any(
+            vol.All(vol.Coerce(int), vol.Range(min=5, max=16)),
+            vol.In(["s", "m", "g"]),
+        ),
+        vol.Optional("gap"): vol.All(int, vol.Range(min=0, max=12)),
     }
 )
 @websocket_api.async_response
@@ -1435,6 +1538,10 @@ async def _ws_set_clock_style(hass, connection, msg) -> None:
         options["clock_icon"] = msg["icon"].strip().removeprefix("mdi:")
     if "icon_color" in msg:
         options["clock_icon_color"] = msg["icon_color"].lstrip("#")
+    if "size" in msg:
+        options["clock_size"] = msg["size"]
+    if "gap" in msg:
+        options["clock_gap"] = int(msg["gap"])
     hass.config_entries.async_update_entry(entry, options=options)
     connection.send_result(msg["id"], {"saved": True})
 
@@ -1474,6 +1581,8 @@ async def _ws_status(hass, connection, msg) -> None:
             "schedule_cfg": entry.options.get("schedule_cfg") or {},
             "device_slots": entry.options.get("device_slots") or {},
             "clock_style": entry.options.get("clock_it_style", "a"),
+            "clock_size": entry.options.get("clock_size", "m"),
+            "clock_gap": entry.options.get("clock_gap", 2),
             "clock_icon": entry.options.get("clock_icon", "heart"),
             "clock_icon_color": entry.options.get("clock_icon_color", "ff0000"),
             "released_s": (
@@ -1816,6 +1925,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ]
         )
         hass.data[f"{DOMAIN}_static_registered"] = True
+
+    # Endpoint HTTP di upload (byte grezzi, oltre il limite 4 MiB del WS)
+    if not hass.data.get(f"{DOMAIN}_view_registered"):
+        hass.http.register_view(IpixelUploadView(hass))
+        hass.data[f"{DOMAIN}_view_registered"] = True
 
     await _async_register_services(hass)
 

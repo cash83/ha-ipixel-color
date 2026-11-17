@@ -32,6 +32,7 @@ F5 = {  # 5x7 (cifre, due punti, barra)
     ":": ("00", "11", "11", "00", "11", "11", "00"),
     "/": ("00001", "00010", "00010", "00100", "01000", "01000", "10000"),
     " ": ("000", "000", "000", "000", "000", "000", "000"),
+    "~": ("00", "00", "00", "00", "00", "00", "00"),  # vuoto largo 2 = colon spento
 }
 
 F3 = {  # 3x5 (testi piccoli: giorni, data, temperatura)
@@ -63,6 +64,8 @@ F3 = {  # 3x5 (testi piccoli: giorni, data, temperatura)
     "-": ("000", "000", "111", "000", "000"),
     ",": ("0", "0", "0", "1", "1"),
     "°": ("11", "11", "00", "00", "00"),
+    ":": ("0", "1", "0", "1", "0"),   # due punti stretti (1 largo)
+    "~": ("0", "0", "0", "0", "0"),   # vuoto largo 1 = colon spento
     " ": ("00", "00", "00", "00", "00"),
 }
 
@@ -191,6 +194,24 @@ def _blit(buf, img, x0: int, y0: int) -> None:
                 buf[yy][xx] = (r, g, b)
 
 
+def _a_metrics(size) -> tuple[dict, int, int]:
+    """Stile A: dato l'altezza voluta dell'ora (in pixel, 5..16) restituisce
+    (font, sx, sy). I font bitmap scalano a interi, quindi le altezze vere
+    sono 5 (F3), 7 (F5), 10 (F3x2) e 14 (F5x2): si aggancia alla piu' vicina.
+    Accetta anche le vecchie etichette s/m/g."""
+    aliases = {"s": 5, "m": 7, "g": 14}
+    h = size
+    if isinstance(h, str):
+        h = aliases.get(h) or (int(h) if h.strip().lstrip("-").isdigit() else 7)
+    try:
+        h = int(h)
+    except (TypeError, ValueError):
+        h = 7
+    cands = ((5, F3, 1, 1), (7, F5, 1, 1), (10, F3, 2, 2), (14, F5, 2, 2))
+    best = min(cands, key=lambda c: abs(c[0] - h))
+    return best[1], best[2], best[3]
+
+
 def render(
     style: str,
     now: datetime.datetime,
@@ -198,6 +219,8 @@ def render(
     temp: str | None = None,
     show_date: bool = False,
     icon=None,
+    size: str = "m",
+    gap: int = 2,
 ) -> tuple[bytes, str]:
     """Una schermata dello stile scelto: (bytes, estensione)."""
     hh, mm = f"{now:%H}", f"{now:%M}"
@@ -220,7 +243,7 @@ def render(
         else:
             txt = main
             if style == "g" and now.second % 2:
-                txt = main.replace(":", " ")
+                txt = main.replace(":", "~")  # colon spento ma stessa larghezza
             _draw(buf, txt, F5, 0, 1, color, sx=2, sy=2, align="center")
         return _png(buf)
 
@@ -353,7 +376,30 @@ def render(
             bufs.append(buf)
         return _gif(bufs, 400)
 
-    # fallback: schermata classica come immagine
+    # fallback (stile A): giorno a lettere (F3) + ora, con GRANDEZZA (in
+    # pixel, slider 5..16) e DISTANZA scelte dall'utente. Il giorno si
+    # ingrandisce da solo (x2) quando resta spazio in larghezza.
     buf = _new_buf()
-    _draw(buf, f"{GIORNI2[now.weekday()]} {main}", F5, 0, 4, color, align="center")
+    if show_date:
+        # a fine minuto la data (16/11/26), centrata, dimensione fissa
+        _draw(buf, main, F5, 0, (H - 7) // 2, color, align="center")
+        return _png(buf)
+
+    day = GIORNI2[now.weekday()]
+    tf, tsx, tsy = _a_metrics(size)
+    gap = max(0, int(gap))
+    time_h = len(tf["0"]) * tsy
+    tw = _text_width(main, tf, tsx)
+    ty = max(0, (H - time_h) // 2)
+    dh3 = len(F3["0"])                      # altezza base del giorno (5)
+    dsx = 1
+    if tsy == 2 and (_text_width(day, F3, 2) + gap + tw + 2) <= W \
+            and (ty + time_h - dh3 * 2) >= 0:
+        dsx = 2                             # il giorno raddoppia con l'ora alta
+    dw = _text_width(day, F3, dsx)
+    day_h = dh3 * dsx
+    x0 = max(0, (W - (dw + gap + tw)) // 2)
+    day_y = max(0, (ty + time_h) - day_h)   # base del giorno = base dell'ora
+    _draw(buf, day, F3, x0, day_y, color, sx=dsx, sy=dsx)
+    _draw(buf, main, tf, x0 + dw + gap, ty, color, sx=tsx, sy=tsy)
     return _png(buf)

@@ -6,12 +6,9 @@
 
 const PAGES = [
   { id: "testo", label: "Testo", icon: "✍️" },
-  { id: "galleria", label: "Galleria", icon: "✨" },
   { id: "disegno", label: "Disegno", icon: "🖌️" },
-  { id: "orologio", label: "Orologio", icon: "🕒" },
   { id: "timer", label: "Timer", icon: "⏱️" },
   { id: "punti", label: "Segnapunti", icon: "🏆" },
-  { id: "immagine", label: "Immagine", icon: "🖼️" },
   { id: "colori", label: "Colori", icon: "🎨" },
   { id: "sistema", label: "Sistema", icon: "⚙️" },
 ];
@@ -163,6 +160,15 @@ class IPixelPanel extends HTMLElement {
     if (el) el.style.visibility = b ? "visible" : "hidden";
   }
 
+  _authToken() {
+    // Token per chiamare un endpoint HTTP autenticato dell'integrazione
+    try {
+      const a = this._hass && this._hass.auth;
+      if (!a) return null;
+      return (a.data && a.data.access_token) || a.accessToken || null;
+    } catch (e) { return null; }
+  }
+
   _toast(msg, isErr) {
     const t = this.shadowRoot.getElementById("toast");
     if (!t) return;
@@ -206,7 +212,14 @@ class IPixelPanel extends HTMLElement {
         padding:16px 18px; margin-bottom:14px; max-width:760px;
         box-shadow:0 0 12px #0ff1 inset; }
       .card h2 { font-size:11px; margin:0 0 12px; font-weight:600; color:#6ee7ff99;
-        text-transform:uppercase; letter-spacing:2px; }
+        text-transform:uppercase; letter-spacing:2px;
+        cursor:pointer; user-select:none; display:flex; align-items:center;
+        justify-content:space-between; gap:8px; }
+      .card h2::after { content:"▾"; font-size:13px; opacity:.6;
+        letter-spacing:0; transition:transform .2s; }
+      .card.collapsed h2 { margin-bottom:0; }
+      .card.collapsed h2::after { transform:rotate(-90deg); }
+      .card.collapsed > *:not(h2) { display:none !important; }
       .row { display:flex; align-items:center; gap:12px; margin:10px 0; flex-wrap:wrap; }
       .row label { min-width:110px; font-size:13px; color:var(--muted); }
       textarea, input[type=text], select { flex:1; min-width:180px; background:#060a12;
@@ -268,8 +281,17 @@ class IPixelPanel extends HTMLElement {
         color:var(--muted); min-height:96px; font-size:13px; gap:6px; }
       .tile.addtile:hover { color:var(--neon); border-color:var(--neon); }
       .tile.addtile .plus { font-size:24px; line-height:1; }
+      #editor-slot:not(:empty) { position:fixed; inset:0; z-index:1000;
+        background:rgba(2,8,18,.72); display:flex; align-items:flex-start;
+        justify-content:center; padding:24px 12px; overflow:auto; }
       .editor { background:#0a1322; border:1px solid var(--neon); border-radius:12px;
-        padding:12px 14px; margin-top:12px; box-shadow:0 0 16px #0ff3; }
+        padding:14px 16px; box-shadow:0 12px 44px #000c, 0 0 16px #0ff3;
+        width:100%; max-width:560px; position:relative; }
+      .ed-x { position:absolute; top:8px; right:8px; width:30px; height:30px;
+        line-height:28px; padding:0; border-radius:50%; font-size:17px;
+        background:#0a1322; border:1px solid var(--line); color:var(--fg);
+        cursor:pointer; z-index:2; }
+      .ed-x:hover { border-color:#ff4d6d; color:#ff4d6d; }
       .gal-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:10px; }
       .gal-tile { background:#000; border:1px solid var(--line); border-radius:10px;
         padding:6px; cursor:pointer; transition:transform .12s, box-shadow .15s; }
@@ -466,6 +488,29 @@ class IPixelPanel extends HTMLElement {
       cv.style.display = on ? "none" : "block";
     };
 
+    if (res && res.kind === "strip" && res.b64) {
+      // Striscia della composizione resa dal server: stessi pixel del
+      // display, la facciamo scorrere pixel-per-pixel (anteprima FEDELE)
+      this._liveKind = "strip";
+      showGif(false);
+      const src = `data:image/${res.ext || "png"};base64,${res.b64}`;
+      if (this._simStripSrc !== src) {
+        this._simStripSrc = src;
+        const im = new Image();
+        im.onload = () => {
+          if (this._simStripSrc !== src) return;
+          const sw = im.width, sh = im.height;
+          const oc = document.createElement("canvas");
+          oc.width = sw; oc.height = sh;
+          const octx = oc.getContext("2d");
+          octx.drawImage(im, 0, 0);
+          this._simStrip = octx.getImageData(0, 0, sw, sh);
+        };
+        im.src = src;
+      }
+      return;
+    }
+
     if (res && res.kind === "image" && res.b64) {
       this._liveKind = "image";
       if (res.ext === "gif") {
@@ -512,9 +557,11 @@ class IPixelPanel extends HTMLElement {
       this._setSimText(res.text, !!res.scroll);
       return;
     }
-    // Niente dal server (o composizione): emulazione locale
+    // Niente dal server: emulazione locale
     this._simFrame = null;
     this._simFrameSrc = null;
+    this._simStrip = null;
+    this._simStripSrc = null;
     if (this._liveKind) { this._liveKind = null; this._updateSimFromState(); }
   }
 
@@ -588,6 +635,47 @@ class IPixelPanel extends HTMLElement {
       return;
     }
 
+    // Striscia della composizione resa dal server: scorre pixel-per-pixel
+    // (anteprima FEDELE: stessi pixel/colori/posizioni del display)
+    const strip = (this._liveKind === "strip") ? this._simStrip : null;
+    if (strip && strip.height === H && strip.width > 0) {
+      const sw = strip.width;
+      const sfits = sw <= W;
+      const vw = sw + W;  // gap di uno schermo prima di ripetere
+      if (!sfits) {
+        const speed = parseInt(this._val("number", "text_speed", "50"), 10) || 0;
+        const interval = (500 - (speed - 1) * 4.7) * 100 / this._simSpeedPct();
+        if (ts - this._simLast > Math.max(25, interval)) {
+          this._simStripOffset = ((this._simStripOffset || 0) + 1) % vw;
+          this._simLast = ts;
+        }
+      } else this._simStripOffset = 0;
+      const off = sfits ? 0 : (this._simStripOffset || 0);
+      const cStart = sfits ? Math.floor((W - sw) / 2) : 0;
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, cv.width, cv.height);
+      for (let x = 0; x < W; x++) {
+        const sx = sfits ? (x - cStart) : ((off + x) % vw);
+        for (let y = 0; y < H; y++) {
+          let r = 0, g = 0, b = 0;
+          if (sx >= 0 && sx < sw) {
+            const i = (y * sw + sx) * 4;
+            r = strip.data[i]; g = strip.data[i + 1]; b = strip.data[i + 2];
+          }
+          if (r + g + b > 30) {
+            ctx.fillStyle = `rgb(${r},${g},${b})`;
+            ctx.shadowColor = ctx.fillStyle; ctx.shadowBlur = 5;
+          } else { ctx.fillStyle = "#0a1420"; ctx.shadowBlur = 0; }
+          ctx.beginPath();
+          ctx.arc(x * cell + cell / 2, y * cellY + cellY / 2,
+            Math.min(cell, cellY) * 0.32, 0, 7);
+          ctx.fill();
+        }
+      }
+      ctx.shadowBlur = 0;
+      return;
+    }
+
     const tcState = this._state("light", "text_color");
     const rgb = (tcState && tcState.attributes && tcState.attributes.rgb_color) || [25, 229, 255];
     const onColor = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
@@ -649,7 +737,7 @@ class IPixelPanel extends HTMLElement {
     const parts = [];
     for (const it of this._items || []) {
       if (it.enabled === false) continue;
-      if (it.type === "text") { if ((it.text || "").trim()) parts.push(it.text.trim()); continue; }
+      if (it.type === "text") { if ((it.text || "").trim()) parts.push({ s: it.text.trim(), gap: it.gap }); continue; }
       if (!it.entity_id) continue;
       const st = this._hass && this._hass.states[it.entity_id];
       let v = "?";
@@ -666,9 +754,16 @@ class IPixelPanel extends HTMLElement {
           .replace(/°/g, "").trim();
         if (u) base += u;
       }
-      parts.push(ic ? ic + " " + base : base);
+      const ig = it.icon_gap == null ? 1 : Math.max(0, it.icon_gap);
+      parts.push({ s: ic ? ic + " ".repeat(ig) + base : base, gap: it.gap });
     }
-    let text = parts.join(" ".repeat(this._sep || 2));
+    const dsep = this._sep || 2;
+    let text = "";
+    parts.forEach((p, i) => {
+      text += p.s;
+      if (i < parts.length - 1)
+        text += " ".repeat(p.gap == null ? dsep : Math.max(0, p.gap));
+    });
     if (!text) text = this._val("text", "display") || "IPIXEL";
     if (text.includes("{")) text = "TEMPLATE";
     this._setSimText(text, true);
@@ -740,6 +835,7 @@ class IPixelPanel extends HTMLElement {
           <button class="btn" id="send-comp">⚡ Invia al display</button>
         </div>
       </div>
+    ` + this._pageOrologio() + `
       <div class="card">
         <h2>Stile del testo</h2>
         <div class="row"><label>Modalità</label><div class="chips">
@@ -750,17 +846,6 @@ class IPixelPanel extends HTMLElement {
           <input type="color" id="tx-color">
           <label style="min-width:auto">Sfondo</label>
           <input type="color" id="tx-bg"></div>
-      </div>
-      <div class="card">
-        <h2>Scritta libera (posizionabile)</h2>
-        <p style="color:var(--muted);font-size:13px;margin:0 0 10px">
-          La disegna il server come un'immagine, dove vuoi tu. Scrivi un
-          testo, scegli un'entità, o tutti e due (mostra il valore del
-          momento). Il colore è quello della scheda "Stile del testo".</p>
-        <div class="row">
-          <input type="text" id="ft-text" placeholder="Testo (facoltativo)" style="max-width:200px">
-          <input type="text" id="ft-ent" list="ent-list" placeholder="Entità (facoltativa)">
-        </div>
         <div class="row"><label>Grandezza</label>
           <input type="range" id="fsize" min="0" max="16" step="1">
           <span class="num" id="fsize-v"></span></div>
@@ -769,42 +854,15 @@ class IPixelPanel extends HTMLElement {
         <div class="row"><label>Arcobaleno</label>
           <input type="range" id="rainbow" min="0" max="9" step="1"><span class="num" id="rainbow-v"></span></div>
         <p style="color:var(--muted);font-size:12px;margin:2px 0 8px">
-          Grandezza, Velocità e Arcobaleno valgono anche per la riga dei
-          sensori che scorre. Per la scritta che scorre la velocità è
-          davvero libera (a 0 va lentissima); la riga dei sensori
-          invece non può scendere sotto il minimo del firmware.</p>
-        <div class="row"><label>Posizione</label><div class="chips">
-          <button class="chip ftx" data-v="left">◀ Sinistra</button>
-          <button class="chip ftx active" data-v="center">Centro</button>
-          <button class="chip ftx" data-v="right">Destra ▶</button></div></div>
-        <div class="row"><label></label><div class="chips">
-          <button class="chip fty" data-v="top">▲ Alto</button>
-          <button class="chip fty active" data-v="center">Centro</button>
-          <button class="chip fty" data-v="bottom">▼ Basso</button></div></div>
-        <div class="row"><label>Movimento</label><div class="chips">
-          <button class="chip ftm active" data-v="none">Fermo</button>
-          <button class="chip ftm" data-v="left">Scorre ←</button>
-          <button class="chip ftm" data-v="right">Scorre →</button></div></div>
-        <div class="row">
-          <button class="btn" id="ft-send">⚡ Mostra scritta</button>
-          <button class="btn sec" id="ft-clear" title="Rimanda i sensori sul display">✕ Togli</button>
-          <img id="ft-prev" hidden
-            style="height:48px;image-rendering:pixelated;border-radius:6px;background:#000">
-        </div>
-        <p style="color:var(--muted);font-size:12px;margin:6px 0 0">
-          Ogni scritta inviata finisce anche in "Le mie immagini"
-          (pagina Immagine): da lì la rimandi quando vuoi o la scegli
-          come fase della rotazione automatica.</p>
+          Valgono per tutta la riga che scorre (sensori, testo, icone).
+          Velocità a 0 = minimo del firmware; Grandezza a 0 = Auto.</p>
       </div>
-      <div class="card"><details>
-        <summary>Avanzate: animazione e testo libero</summary>
-        <p style="color:var(--muted);font-size:12px;margin:8px 0 8px">
-          L'animazione vale per la riga dei sensori che scorre.</p>
-        <div class="row"><label>Animazione</label><div class="chips">${animChips}</div></div>
-        <div class="row"><textarea id="txt" placeholder="Testo fisso, oppure template: {{ states('sensor.xxx') }}"></textarea></div>
-        <div class="row"><button class="btn sec" id="send-text">Invia questo testo (ignora le piastrelle)</button></div>
-      </details></div>
-    `;
+    `
+      // Tutto il "visivo" vive qui nel tab Testo: immagine/GIF, orologio,
+      // animazioni e rotazione. Riuso l'HTML delle vecchie pagine (stessi
+      // id) cosi' il loro codice di aggancio eventi gira da solo.
+      + this._pageImmagine()
+      + this._pageGalleria();
   }
 
   _pageGalleria() {
@@ -815,26 +873,15 @@ class IPixelPanel extends HTMLElement {
       </div>`;
     const sfondi = Array.from({ length: 10 }, (_, i) =>
       tile(`sfondo_${String(i + 1).padStart(2, "0")}.gif`)).join("");
-    const occhi = [];
-    for (let i = 1; i <= 9; i++) {
-      occhi.push(tile(`occhio_l_${i}.gif`));
-      occhi.push(tile(`occhio_r_${i}.gif`));
-    }
     const ritmo = [1, 2].map((i) => tile(`ritmo_${i}.gif`)).join("");
     return `
       <div class="card">
-        <h2>Animazioni</h2>
+        <h2>Animazioni e ritmo</h2>
         <p style="color:var(--muted);font-size:13px;margin:0 0 10px">
           Le animazioni originali dell'app, già nel formato del pannello:
           tocca per mandarla sul display.</p>
         <div class="gal-grid">${sfondi}</div>
-      </div>
-      <div class="card">
-        <h2>Occhi</h2>
-        <div class="gal-grid">${occhi.join("")}</div>
-      </div>
-      <div class="card">
-        <h2>Ritmo</h2>
+        <div class="row" style="margin-top:16px"><b>Ritmo / equalizzatore</b></div>
         <div class="gal-grid">${ritmo}</div>
         <div class="row" style="margin-top:12px"><label>Equalizzatore</label><div class="chips">
           <button class="chip ry-style" data-v="0">Stile 1</button>
@@ -854,43 +901,13 @@ class IPixelPanel extends HTMLElement {
       <div class="card">
         <h2>Rotazione automatica</h2>
         <p style="color:var(--muted);font-size:13px;margin:0 0 10px">
-          Alterna da solo: prima i sensori, poi l'animazione scelta, e da capo.
-          Gira sul server e riparte anche dopo i riavvii di HA.</p>
-        <div class="row">
-          <label class="switch"><input type="checkbox" id="rot-use-s" checked><span class="sl"></span></label>
-          <label style="min-width:90px"><b>Sensori</b> per</label>
-          <input type="text" id="rot-comp" inputmode="numeric" value="5" style="max-width:90px;flex:none">
-          <select id="rot-comp-u" style="flex:none;min-width:110px">
-            <option value="60">minuti</option>
-            <option value="1">secondi</option>
-            <option value="ent">sec. a entità</option>
-          </select>
-          <span style="color:var(--muted);font-size:12px">("sec. a entità": conta da sola le caselle accese)</span></div>
-        <div class="row">
-          <label class="switch"><input type="checkbox" id="rot-use-a" checked><span class="sl"></span></label>
-          <label style="min-width:90px"><b>Animazione</b></label>
-          <select id="rot-anim" style="min-width:150px">${this._galleryOptions()}</select>
-          <span style="color:var(--muted)">per</span>
-          <input type="text" id="rot-anim-s" inputmode="numeric" value="60" style="max-width:90px;flex:none">
-          <select id="rot-anim-u" style="flex:none;min-width:110px">
-            <option value="1">secondi</option>
-            <option value="60">minuti</option>
-          </select></div>
-        <div class="row">
-          <label class="switch"><input type="checkbox" id="rot-use-c"><span class="sl"></span></label>
-          <label style="min-width:90px"><b>Orologio</b> per</label>
-          <input type="text" id="rot-clock-s" inputmode="numeric" value="60" style="max-width:90px;flex:none">
-          <select id="rot-clock-u" style="flex:none;min-width:110px">
-            <option value="1">secondi</option>
-            <option value="60">minuti</option>
-          </select>
-          <span style="color:var(--muted);font-size:12px">(orologio italiano, con lo stile scelto lì)</span></div>
-        <div class="row" style="margin-top:14px"><b>Scaletta — scegli tu cosa e quando</b></div>
+          Alterna da sola i contenuti che scegli tu (sensori, immagini,
+          orologio), ognuno con la sua durata, e torna da capo. Gira sul
+          server e riparte anche dopo i riavvii di HA; si salva da sola e
+          la rilegge a ogni giro, anche mentre gira.</p>
+        <div class="row" style="margin-top:4px"><b>Scaletta — scegli tu cosa e quando</b></div>
         <p style="color:var(--muted);font-size:12px;margin:2px 0 8px">
-          Aggiungi i passi nell'ordine che vuoi, ognuno con la sua durata.
-          Se la scaletta ha dei passi comanda lei e le tre righe sopra
-          vengono ignorate. Si salva da sola; la rotazione la rilegge a
-          ogni giro, anche mentre gira.</p>
+          Aggiungi i passi nell'ordine che vuoi, ognuno con la sua durata.</p>
         <div id="pl-list"></div>
         <div class="row">
           <button class="chip" id="pl-add-s">+ Sensori</button>
@@ -1092,10 +1109,6 @@ class IPixelPanel extends HTMLElement {
     for (let i = 1; i <= 10; i++) {
       const f = `sfondo_${String(i).padStart(2, "0")}.gif`;
       opts.push(`<option value="${f}">Sfondo ${i}</option>`);
-    }
-    for (let i = 1; i <= 9; i++) {
-      opts.push(`<option value="occhio_l_${i}.gif">Occhio sx ${i}</option>`);
-      opts.push(`<option value="occhio_r_${i}.gif">Occhio dx ${i}</option>`);
     }
     opts.push(`<option value="ritmo_1.gif">Ritmo 1</option>`);
     opts.push(`<option value="ritmo_2.gif">Ritmo 2</option>`);
@@ -1300,13 +1313,22 @@ class IPixelPanel extends HTMLElement {
             <option value="e">E — Con i secondi</option>
             <option value="f">F — Ora + temperatura</option>
             <option value="g">G — Due punti lampeggianti</option>
-            <option value="h">H — Binario (per i nerd)</option>
             <option value="i">I — A parole (LE DUE E MEZZA)</option>
             <option value="l">L — Sole e luna</option>
             <option value="m">M — Fiamme sotto l'ora</option>
             <option value="n">N — Cielo stellato</option>
             <option value="o">O — Ora + icona a scelta</option>
           </select></div>
+        <div class="row"><label>Grandezza</label>
+          <input type="range" id="clk-size" min="5" max="16" step="1" value="7">
+          <span class="num" id="clk-size-v">piccola</span></div>
+        <div class="row"><label>Distanza</label>
+          <input type="range" id="clk-gap" min="0" max="12" step="1" value="2">
+          <span class="num" id="clk-gap-v">2</span></div>
+        <p style="color:var(--muted);font-size:12px;margin:0 0 8px">
+          Grandezza (altezza in pixel, il display è alto 16) e distanza
+          valgono per lo <b>Stile A</b> (giorno + ora). Il giorno si
+          ingrandisce da solo quando c'è spazio.</p>
         <div class="row"><label>Icona (stile O)</label>
           <input type="text" id="clock-icon" placeholder="es. heart o 😍" style="max-width:140px">
           <input type="color" id="clock-icon-color" value="#ff0000"></div>
@@ -1329,7 +1351,11 @@ class IPixelPanel extends HTMLElement {
       <div class="card">
         <h2>Invia un'immagine</h2>
         <div class="drop" id="drop">Trascina un'immagine qui, o tocca per sceglierla<br>
-          <small>PNG, JPG o GIF — adattata al pannello</small>
+          <small>PNG, JPG o GIF — adattata al pannello.<br>
+          📱 Sul telefono, per le GIF scegli <b>«File»/«Scegli file»</b>
+          (da «Foto» il telefono può dire «impossibile inserire questo
+          contenuto»). Oppure incolla il <b>link</b> qui sotto: funziona
+          sempre.</small>
           <input type="file" id="file" accept="image/*" style="display:none">
         </div>
         <div class="row" style="margin-top:14px"><label>Adattamento</label><div class="chips">
@@ -1338,6 +1364,16 @@ class IPixelPanel extends HTMLElement {
         <div class="row"><label>Anteprima</label>
           <canvas id="preview" class="preview" width="64" height="16" style="width:512px;max-width:100%"></canvas></div>
         <div class="row"><button class="btn" id="send-img" disabled>⚡ Invia immagine</button></div>
+        <div class="row" style="margin-top:8px;border-top:1px solid var(--line);padding-top:12px">
+          <label><b>Oppure da un link</b></label></div>
+        <p style="color:var(--muted);font-size:12px;margin:0 0 8px">
+          Incolla il link di una GIF o immagine (Giphy, Tenor, qualsiasi
+          sito): la scarica il server e la adatta da sola. Funziona
+          sempre, anche dal telefono.</p>
+        <div class="row">
+          <input type="text" id="url-img" placeholder="https://...gif">
+          <button class="btn" id="send-url">⚡ Scarica e invia</button>
+        </div>
       </div>
       <div class="card">
         <h2>Le mie immagini</h2>
@@ -1355,51 +1391,6 @@ class IPixelPanel extends HTMLElement {
           inviata (immagine, scritta, icona…) e richiamala all'istante
           con un comando da 7 byte. Restano anche senza Home Assistant.</p>
         <div id="slot-list"></div>
-      </div>
-      <div class="card">
-        <h2>Da internet</h2>
-        <p style="color:var(--muted);font-size:13px;margin:0 0 10px">
-          Incolla il link di una GIF o immagine (da Giphy, Tenor, qualsiasi sito):
-          la scarica il server e la adatta al pannello da solo.</p>
-        <div class="row">
-          <input type="text" id="url-img" placeholder="https://...gif">
-          <button class="btn" id="send-url">⚡ Scarica e invia</button>
-        </div>
-      </div>
-      <div class="card">
-        <h2>Icona</h2>
-        <p style="color:var(--muted);font-size:13px;margin:0 0 10px">
-          Un'icona Material Design sul display: scrivi il nome
-          (es. <i>heart</i>, <i>thermometer</i>, <i>weather-sunny</i>,
-          <i>home</i>, <i>car</i> — tutti i nomi su pictogrammers.com).
-          Oppure scrivi direttamente un'emoji (😍 🌡 🏠…): resta coi
-          suoi colori, e il campo Colore viene ignorato.</p>
-        <div class="row">
-          <input type="text" id="icon-name" placeholder="es. heart o 😍" style="max-width:180px">
-          <label style="min-width:auto">Colore</label>
-          <input type="color" id="icon-color" value="#19e5ff">
-        </div>
-        <div class="row"><label>Grandezza</label>
-          <input type="range" id="icon-size" min="6" max="16" value="16">
-          <span class="num" id="icon-size-v">16</span></div>
-        <div class="row"><label>Posizione</label><div class="chips">
-          <button class="chip ipx" data-v="left">◀ Sinistra</button>
-          <button class="chip ipx active" data-v="center">Centro</button>
-          <button class="chip ipx" data-v="right">Destra ▶</button></div></div>
-        <div class="row"><label></label><div class="chips">
-          <button class="chip ipy" data-v="top">▲ Alto</button>
-          <button class="chip ipy active" data-v="center">Centro</button>
-          <button class="chip ipy" data-v="bottom">▼ Basso</button></div></div>
-        <div class="row"><label>Movimento</label><div class="chips">
-          <button class="chip imv active" data-v="none">Fermo</button>
-          <button class="chip imv" data-v="left">Scorre ←</button>
-          <button class="chip imv" data-v="right">Scorre →</button></div></div>
-        <div class="row">
-          <button class="btn" id="send-icon">⚡ Mostra icona</button>
-          <button class="btn sec" id="icon-clear" title="Rimanda i sensori sul display">✕ Togli</button>
-          <img id="icon-prev" hidden
-            style="height:48px;image-rendering:pixelated;border-radius:6px;background:#000">
-        </div>
       </div>
     `;
   }
@@ -1531,7 +1522,10 @@ class IPixelPanel extends HTMLElement {
   }
 
   _tileIcon(it) {
-    if (it.type === "text") return "📝";
+    if (it.type === "text") {
+      const t = (it.text || "").trim();
+      return (t && !/[a-zA-Z0-9]/.test(t) && [...t].length <= 4) ? t : "📝";
+    }
     const st = this._hass && this._hass.states[it.entity_id];
     const unit = (st && st.attributes && st.attributes.unit_of_measurement) || "";
     const dc = (st && st.attributes && st.attributes.device_class) || "";
@@ -1566,7 +1560,8 @@ class IPixelPanel extends HTMLElement {
       </div>`).join("");
     box.innerHTML = tiles + `
       <div class="tile addtile" id="add-ent"><span class="plus">+</span>Sensore</div>
-      <div class="tile addtile" id="add-txt"><span class="plus">+</span>Testo fisso</div>`;
+      <div class="tile addtile" id="add-txt"><span class="plus">+</span>Testo fisso</div>
+      <div class="tile addtile" id="add-emoji"><span class="plus">+</span>Icona/Emoji</div>`;
 
     box.querySelectorAll(".tile[data-i]").forEach((t) =>
       t.addEventListener("click", (ev) => {
@@ -1575,7 +1570,7 @@ class IPixelPanel extends HTMLElement {
         if (Date.now() - (this._dragEndAt || 0) < 400) return;
         const it = this._items[t.dataset.i];
         it.enabled = it.enabled === false ? true : false;
-        this._renderTiles(); this._updateSimFromState();
+        this._renderTiles(); this._updateSimFromState(); this._autoSend();
       }));
     this._bindTileDrag(box);
     box.querySelectorAll(".edit").forEach((b) =>
@@ -1591,6 +1586,9 @@ class IPixelPanel extends HTMLElement {
     });
     box.querySelector("#add-txt").addEventListener("click", () => {
       this._addMode = "text"; this._editIndex = null; this._renderEditor();
+    });
+    box.querySelector("#add-emoji").addEventListener("click", () => {
+      this._addMode = "emoji"; this._editIndex = null; this._renderEditor();
     });
   }
 
@@ -1666,7 +1664,7 @@ class IPixelPanel extends HTMLElement {
         this._items = order.map((i) => this._items[i]);
         this._renderTiles();
         this._updateSimFromState();
-        this._saveComposition(); // nuovo ordine dritto al display
+        this._autoSend(); // nuovo ordine dritto al display
       }
     };
 
@@ -1699,7 +1697,7 @@ class IPixelPanel extends HTMLElement {
   _renderEditor() {
     const slot = this.shadowRoot.getElementById("editor-slot");
     if (!slot) return;
-    const close = `<button class="chip" id="ed-close">Chiudi</button>`;
+    const close = `<button class="ed-x" id="ed-close" title="Chiudi" aria-label="Chiudi">✕</button>`;
 
     if (this._addMode === "entity") {
       slot.innerHTML = `<div class="editor">
@@ -1712,7 +1710,7 @@ class IPixelPanel extends HTMLElement {
         if (!eid || !this._hass.states[eid]) return this._toast("Scegli un sensore dalla lista", true);
         if (!this._items) this._items = [];
         this._items.push({ type: "entity", entity_id: eid, label: this._guessLabel(eid), decimals: 1, enabled: true });
-        this._addMode = null; this._renderEditor(); this._renderTiles(); this._updateSimFromState();
+        this._addMode = null; this._renderEditor(); this._renderTiles(); this._updateSimFromState(); this._autoSend();
       });
       slot.querySelector("#ed-close").addEventListener("click", () => { this._addMode = null; this._renderEditor(); });
       slot.querySelector("#ed-entity").focus();
@@ -1733,10 +1731,40 @@ class IPixelPanel extends HTMLElement {
         if (!txt) return;
         if (!this._items) this._items = [];
         this._items.push({ type: "text", text: txt, enabled: true });
-        this._addMode = null; this._renderEditor(); this._renderTiles(); this._updateSimFromState();
+        this._addMode = null; this._renderEditor(); this._renderTiles(); this._updateSimFromState(); this._autoSend();
       });
       slot.querySelector("#ed-close").addEventListener("click", () => { this._addMode = null; this._renderEditor(); });
       slot.querySelector("#ed-text").focus();
+      return;
+    }
+
+    if (this._addMode === "emoji") {
+      const picks = ["❤️","🧡","💛","💚","💙","💜","🤍","🌡️","💧","⚡","🔋","🔌",
+        "☀️","🌙","⛅","🌧️","❄️","🔥","🌈","🏠","🚗","🔔","✅","⚠️","⭐","🎵",
+        "😀","😍","👍","🕐","📅","📈","🎉","💪","🍀","🎁"];
+      slot.innerHTML = `<div class="editor">
+        <div class="row"><label>Icona / Emoji</label>
+          <input type="text" id="ed-emoji" placeholder="❤️  (tocca qui sotto)" style="max-width:140px"></div>
+        <div class="row"><div class="chips" id="emoji-picks" style="flex-wrap:wrap;gap:6px">
+          ${picks.map((e) => `<button class="chip emoji-pick" data-e="${e}" style="font-size:18px;padding:4px 8px">${e}</button>`).join("")}
+        </div></div>
+        <p style="color:var(--muted);font-size:12px;margin:4px 0 8px">
+          Diventa una casella che SCORRE nella riga insieme ai sensori e
+          al testo. Puoi metterne più d'una e spostarle dove vuoi con ✎.</p>
+        <div class="row"><button class="btn" id="ed-add">Aggiungi</button>${close}</div>
+      </div>`;
+      const inp = slot.querySelector("#ed-emoji");
+      slot.querySelectorAll(".emoji-pick").forEach((b) =>
+        b.addEventListener("click", () => { inp.value += b.dataset.e; inp.focus(); }));
+      slot.querySelector("#ed-add").addEventListener("click", () => {
+        const e = (inp.value || "").trim();
+        if (!e) return;
+        if (!this._items) this._items = [];
+        this._items.push({ type: "text", text: e, enabled: true });
+        this._addMode = null; this._renderEditor(); this._renderTiles(); this._updateSimFromState(); this._autoSend();
+      });
+      slot.querySelector("#ed-close").addEventListener("click", () => { this._addMode = null; this._renderEditor(); });
+      inp.focus();
       return;
     }
 
@@ -1748,19 +1776,37 @@ class IPixelPanel extends HTMLElement {
       slot.innerHTML = `<div class="editor">
         <div class="row"><label>Testo</label>
           <input type="text" id="ed-text" value="${(it.text || "").replace(/"/g, "&quot;")}"></div>
+        <div class="row"><label>Distanza dopo</label>
+          <input type="range" id="ed-gap" min="0" max="8" step="1"
+            value="${it.gap == null ? 2 : it.gap}">
+          <span class="num" id="ed-gap-v">${it.gap == null ? "normale" : it.gap}</span></div>
         <div class="row">
-          <button class="btn sec" id="ed-left">◀ Sposta</button>
-          <button class="btn sec" id="ed-right">Sposta ▶</button>
           <button class="btn sec" id="ed-del" style="color:#ff4d6d;border-color:#ff4d6d">Elimina</button>
           ${close}</div>
       </div>`;
       slot.querySelector("#ed-text").addEventListener("input", (e) => {
-        it.text = e.target.value; this._renderTiles(); this._updateSimFromState();
+        it.text = e.target.value; this._renderTiles(); this._updateSimFromState(); this._autoSend();
       });
     } else {
       slot.innerHTML = `<div class="editor">
         <div class="row"><label>Etichetta</label>
           <input type="text" id="ed-label" value="${(it.label || "").replace(/"/g, "&quot;")}"></div>
+        <div class="row"><label>Colore</label>
+          <input type="color" id="ed-color"
+            value="${it.color ? "#" + String(it.color).replace("#", "") : "#ffffff"}">
+          <button class="chip" id="ed-color-auto">Generale</button></div>
+        <div class="row"><label>➕ Sensore sotto</label>
+          <input type="text" id="ed-below" list="ent-list" style="max-width:140px"
+            placeholder="2° sensore impilato"
+            value="${it.below && it.below.entity_id ? it.below.entity_id : ""}">
+          <input type="color" id="ed-below-color" title="colore della riga sotto"
+            value="${it.below && it.below.color ? "#" + String(it.below.color).replace("#", "") : "#00c8ff"}">
+          <button class="chip" id="ed-below-clear">Togli</button></div>
+        <p style="color:var(--muted);font-size:12px;margin:4px 0 8px">
+          Un secondo sensore <b>impilato sotto</b> il primo, nello stesso
+          spazio (due righe da 7px che scorrono insieme). Ogni riga ha il
+          <b>suo colore</b> e le sue icone; con un sensore sotto
+          grandezza/posizione non si applicano.</p>
         <div class="row"><label>Decimali</label>
           <div class="chips">
             <button class="chip dec-chip" data-v="0">0</button>
@@ -1780,28 +1826,32 @@ class IPixelPanel extends HTMLElement {
         <p style="color:var(--muted);font-size:12px;margin:4px 0 8px">
           L'emoji che scorre davanti al valore. Vuoto = automatica dal
           tipo di sensore; "Niente" la toglie solo per questa casella.</p>
+        <div class="row"><label>Distanza icona</label>
+          <input type="range" id="ed-icon-gap" min="0" max="5" step="1"
+            value="${it.icon_gap == null ? 1 : it.icon_gap}">
+          <span class="num" id="ed-icon-gap-v">${it.icon_gap == null ? "normale" : it.icon_gap}</span></div>
         <div class="row"><label>Grandezza</label>
           <input type="range" id="ed-size" min="5" max="16" step="1"
             value="${it.size || 16}">
           <span class="num" id="ed-size-v">${it.size ? it.size : "piena"}</span></div>
-        <div class="row"><label>Posizione</label><div class="chips">
-          <button class="chip va-chip" data-v="top">▲ Alto</button>
-          <button class="chip va-chip" data-v="center">Centro</button>
-          <button class="chip va-chip" data-v="bottom">▼ Basso</button>
-        </div></div>
-        <p style="color:var(--muted);font-size:12px;margin:4px 0 8px">
-          Grandezza e posizione valgono SOLO per questa casella, dentro
-          la riga che scorre (icona compresa). La posizione conta quando
-          la casella è più piccola della riga.</p>
+        <div class="row"><label>Posizione</label>
+          <input type="range" id="ed-voff" min="0" max="11" step="1"
+            value="${it.voff != null ? it.voff : (it.valign === "bottom" ? Math.max(0, 16 - (it.size || 16)) : it.valign === "top" ? 0 : Math.round(Math.max(0, 16 - (it.size || 16)) / 2))}">
+          <span class="num" id="ed-voff-v">${it.voff != null ? it.voff + " px" : "auto"}</span></div>
+        <p style="color:var(--muted);font-size:12px;margin:0 0 6px">
+          Posizione verticale (px dall'alto, 0 = in cima). Vale quando la
+          casella è rimpicciolita (a piena non c'è spazio per spostarla).</p>
+        <div class="row"><label>Distanza dopo</label>
+          <input type="range" id="ed-gap" min="0" max="8" step="1"
+            value="${it.gap == null ? 2 : it.gap}">
+          <span class="num" id="ed-gap-v">${it.gap == null ? "normale" : it.gap}</span></div>
         <div class="row" style="color:var(--muted);font-size:12px">${it.entity_id}</div>
         <div class="row">
-          <button class="btn sec" id="ed-left">◀ Sposta</button>
-          <button class="btn sec" id="ed-right">Sposta ▶</button>
           <button class="btn sec" id="ed-del" style="color:#ff4d6d;border-color:#ff4d6d">Elimina</button>
           ${close}</div>
       </div>`;
       slot.querySelector("#ed-label").addEventListener("input", (e) => {
-        it.label = e.target.value; this._renderTiles(); this._updateSimFromState();
+        it.label = e.target.value; this._renderTiles(); this._updateSimFromState(); this._autoSend();
       });
       slot.querySelector("#ed-size").addEventListener("input", (e) => {
         const v = parseInt(e.target.value, 10);
@@ -1809,64 +1859,123 @@ class IPixelPanel extends HTMLElement {
         slot.querySelector("#ed-size-v").textContent = v >= 16 ? "piena" : v;
       });
       slot.querySelector("#ed-size").addEventListener("change", () => {
-        this._renderTiles(); this._updateSimFromState();
+        this._renderTiles(); this._updateSimFromState(); this._autoSend();
       });
-      slot.querySelectorAll(".va-chip").forEach((c) => {
-        c.classList.toggle("active", (it.valign || "center") === c.dataset.v);
-        c.addEventListener("click", () => {
-          if (c.dataset.v === "center") delete it.valign;
-          else it.valign = c.dataset.v;
-          slot.querySelectorAll(".va-chip").forEach((x) =>
-            x.classList.toggle("active", x === c));
+      const voffEl = slot.querySelector("#ed-voff");
+      if (voffEl) {
+        voffEl.addEventListener("input", (e) => {
+          it.voff = parseInt(e.target.value, 10);
+          delete it.valign;  // la posizione a px ha la precedenza
+          const v = slot.querySelector("#ed-voff-v");
+          if (v) v.textContent = it.voff + " px";
           this._updateSimFromState();
         });
-      });
+        voffEl.addEventListener("change", () => {
+          this._renderTiles(); this._updateSimFromState(); this._autoSend();
+        });
+      }
+      const belowEl = slot.querySelector("#ed-below");
+      const belowCol = slot.querySelector("#ed-below-color");
+      if (belowEl) {
+        const setBelow = () => {
+          const eid = belowEl.value.trim();
+          if (eid && this._hass && this._hass.states[eid]) {
+            it.below = {
+              entity_id: eid, label: this._guessLabel(eid),
+              decimals: 1, show_unit: !!it.show_unit,
+              color: belowCol ? belowCol.value.slice(1) : undefined,
+            };
+          } else if (!eid) {
+            delete it.below;
+          } else {
+            return this._toast("Scegli un sensore dalla lista", true);
+          }
+          this._renderTiles(); this._updateSimFromState(); this._autoSend();
+        };
+        belowEl.addEventListener("change", setBelow);
+        if (belowCol) belowCol.addEventListener("change", () => {
+          if (it.below) {
+            it.below.color = belowCol.value.slice(1);
+            this._renderTiles(); this._updateSimFromState(); this._autoSend();
+          }
+        });
+        const clr = slot.querySelector("#ed-below-clear");
+        if (clr) clr.addEventListener("click", () => {
+          delete it.below; belowEl.value = "";
+          this._renderTiles(); this._updateSimFromState(); this._autoSend();
+        });
+      }
+      const colEl = slot.querySelector("#ed-color");
+      if (colEl) {
+        colEl.addEventListener("change", () => {
+          it.color = colEl.value.slice(1);
+          this._renderTiles(); this._updateSimFromState(); this._autoSend();
+        });
+        const auto = slot.querySelector("#ed-color-auto");
+        if (auto) auto.addEventListener("click", () => {
+          delete it.color;
+          this._renderTiles(); this._updateSimFromState(); this._autoSend();
+        });
+      }
       slot.querySelectorAll(".unit-chip").forEach((c) => {
         c.classList.toggle("active", (it.show_unit ? "si" : "no") === c.dataset.v);
         c.addEventListener("click", () => {
           it.show_unit = c.dataset.v === "si";
           slot.querySelectorAll(".unit-chip").forEach((x) =>
             x.classList.toggle("active", x === c));
-          this._renderTiles(); this._updateSimFromState();
+          this._renderTiles(); this._updateSimFromState(); this._autoSend();
         });
       });
       slot.querySelector("#ed-icon").addEventListener("input", (e) => {
         const v = e.target.value.trim();
         if (v) it.icon = v; else delete it.icon;  // vuoto = automatica
-        this._updateSimFromState();
+        this._renderTiles(); this._updateSimFromState(); this._autoSend();
       });
       slot.querySelector("#ed-icon-auto").addEventListener("click", () => {
         delete it.icon; slot.querySelector("#ed-icon").value = "";
-        this._updateSimFromState();
+        this._renderTiles(); this._updateSimFromState(); this._autoSend();
       });
       slot.querySelector("#ed-icon-none").addEventListener("click", () => {
         it.icon = ""; slot.querySelector("#ed-icon").value = "";
         this._toast("Icona tolta per questa casella");
-        this._updateSimFromState();
+        this._renderTiles(); this._updateSimFromState(); this._autoSend();
       });
+      const igap = slot.querySelector("#ed-icon-gap");
+      if (igap) {
+        igap.addEventListener("input", (e) => {
+          it.icon_gap = parseInt(e.target.value, 10);
+          const g = slot.querySelector("#ed-icon-gap-v");
+          if (g) g.textContent = it.icon_gap;
+          this._updateSimFromState();
+        });
+        igap.addEventListener("change", () => {
+          this._renderTiles(); this._updateSimFromState(); this._autoSend();
+        });
+      }
       slot.querySelectorAll(".dec-chip").forEach((c) => {
         c.classList.toggle("active", String(it.decimals == null ? 1 : it.decimals) === c.dataset.v);
         c.addEventListener("click", () => {
           it.decimals = parseInt(c.dataset.v, 10);
           slot.querySelectorAll(".dec-chip").forEach((x) => x.classList.toggle("active", x === c));
-          this._renderTiles(); this._updateSimFromState();
+          this._renderTiles(); this._updateSimFromState(); this._autoSend();
         });
       });
     }
 
+    const gapEl = slot.querySelector("#ed-gap");
+    if (gapEl) {
+      gapEl.addEventListener("input", (e) => {
+        it.gap = parseInt(e.target.value, 10);
+        const gv = slot.querySelector("#ed-gap-v");
+        if (gv) gv.textContent = it.gap;
+      });
+      gapEl.addEventListener("change", () => {
+        this._renderTiles(); this._updateSimFromState(); this._autoSend();
+      });
+    }
     slot.querySelector("#ed-del").addEventListener("click", () => {
       this._items.splice(this._editIndex, 1);
-      this._editIndex = null; this._renderEditor(); this._renderTiles(); this._updateSimFromState();
-    });
-    slot.querySelector("#ed-left").addEventListener("click", () => {
-      const i = this._editIndex;
-      if (i > 0) { [this._items[i - 1], this._items[i]] = [this._items[i], this._items[i - 1]];
-        this._editIndex = i - 1; this._renderTiles(); this._renderEditor(); this._updateSimFromState(); }
-    });
-    slot.querySelector("#ed-right").addEventListener("click", () => {
-      const i = this._editIndex;
-      if (i < this._items.length - 1) { [this._items[i + 1], this._items[i]] = [this._items[i], this._items[i + 1]];
-        this._editIndex = i + 1; this._renderTiles(); this._renderEditor(); this._updateSimFromState(); }
+      this._editIndex = null; this._renderEditor(); this._renderTiles(); this._updateSimFromState(); this._autoSend();
     });
     slot.querySelector("#ed-close").addEventListener("click", () => {
       this._editIndex = null; this._renderEditor();
@@ -1890,7 +1999,7 @@ class IPixelPanel extends HTMLElement {
     this._updateSimFromState();
   }
 
-  async _saveComposition() {
+  async _saveComposition(silent = false) {
     if (!this._hass || !this._dev) return;
     const items = (this._items || []).filter(
       (it) => (it.type === "text" ? (it.text || "").trim() : it.entity_id));
@@ -1900,10 +2009,30 @@ class IPixelPanel extends HTMLElement {
         type: "ipixel_color/set_composition", address: this._dev.address, items,
         separator: this._sep || 2,
       });
-      this._toast(res.displayed ? "Inviato al display ✓" : "Salvato, ma invio fallito", !res.displayed);
+      if (!silent) {
+        this._toast(res.displayed ? "Inviato al display ✓" : "Salvato, ma invio fallito", !res.displayed);
+      } else if (!res.displayed) {
+        this._toast("Invio fallito", true);
+      }
+      // aggiorna subito l'anteprima fedele (striscia resa dal server)
+      this._pollFrame();
     } catch (e) {
       this._toast("Errore: " + (e.message || e), true);
     } finally { this._setBusy(false); }
+  }
+
+  /* Invio automatico "subito subito": a ogni modifica delle caselle la
+     composizione parte da sola verso il display, senza premere "Invia al
+     display". Debounce ~400ms per non intasare il BLE; se c'è un invio in
+     corso riprova a breve. Si può spegnere con this._autoApply = false. */
+  _autoSend(delay = 400) {
+    if (this._autoApply === false) return;
+    if (!this._items) return;                 // niente da inviare finché non carica
+    clearTimeout(this._autoT);
+    this._autoT = setTimeout(() => {
+      if (this._busy) { this._autoSend(250); return; }
+      this._saveComposition(true);
+    }, delay);
   }
 
   /* Rimanda i sensori sul display: toglie scritta/icona/immagine.
@@ -1965,6 +2094,18 @@ class IPixelPanel extends HTMLElement {
   _bindPage() {
     const $ = (id) => this.shadowRoot.getElementById(id);
     if (!this._dev) return;
+
+    // Sezioni richiudibili: clic sul titolo piega/espande la card.
+    // Lo stato (per titolo) resta durante la sessione.
+    this._collapsed = this._collapsed || new Set();
+    this.shadowRoot.querySelectorAll(".card > h2").forEach((h) => {
+      const key = h.textContent.trim();
+      if (this._collapsed.has(key)) h.parentElement.classList.add("collapsed");
+      h.addEventListener("click", () => {
+        const on = h.parentElement.classList.toggle("collapsed");
+        if (on) this._collapsed.add(key); else this._collapsed.delete(key);
+      });
+    });
 
     // --- Testo
     if ($("send-comp")) {
@@ -2054,75 +2195,11 @@ class IPixelPanel extends HTMLElement {
       $("rainbow").addEventListener("change", () =>
         applyNow("number", "set_value", {
           entity_id: this._eid("number", "text_rainbow"), value: $("rainbow").value }));
-      $("send-text").addEventListener("click", async () => {
-        const txt = $("txt").value;
-        if (!txt.trim()) return this._toast("Scrivi qualcosa prima", true);
-        try {
-          await this._hass.callWS({
-            type: "ipixel_color/set_composition", address: this._dev.address, items: [] });
-          this._items = []; this._renderTiles();
-        } catch (e) { /* continua comunque */ }
-        await this._call("text", "set_value", {
-          entity_id: this._eid("text", "display"), value: txt });
-      });
+      // "Invia questo testo" (card Avanzate) rimosso su richiesta.
 
-      // --- Scritta libera (disegnata dal server, come le icone)
-      this._ftOpt = this._ftOpt || { pos_x: "center", pos_y: "center", motion: "none" };
-      const sendFree = async () => {
-        const txt2 = ($("ft-text").value || "").trim();
-        const ent = ($("ft-ent").value || "").trim();
-        if (!txt2 && !ent) return this._toast("Scrivi un testo o scegli un'entità", true);
-        if (ent && !this._hass.states[ent])
-          return this._toast("Entità non trovata: scegli dalla lista", true);
-        if (this._busy) return this._toast("Attendi: invio ancora in corso…", true);
-        this._setBusy(true);
-        try {
-          // Colore e grandezza: quelli della scheda "Stile del testo"
-          const tcSt = this._state("light", "text_color");
-          const rgb = (tcSt && tcSt.attributes && tcSt.attributes.rgb_color) || [255, 255, 255];
-          const colorHex = rgb.map((v) => v.toString(16).padStart(2, "0")).join("");
-          let fsz = parseInt(parseFloat(this._val("number", "font_size", "0")), 10) || 0;
-          const { h: HH } = this._panelSize();
-          if (fsz <= 0 || fsz > HH) fsz = HH;
-          const payload = {
-            type: "ipixel_color/show_free_text", address: this._dev.address,
-            text: txt2, entity_id: ent, color: colorHex,
-            size: Math.max(5, fsz),
-            pos_x: this._ftOpt.pos_x, pos_y: this._ftOpt.pos_y,
-            motion: this._ftOpt.motion,
-            speed: parseInt(this._val("number", "text_speed", "50"), 10) || 0,
-          };
-          const fnt = this._val("select", "font", "");
-          if (fnt) payload.font = fnt;
-          const res = await this._hass.callWS(payload);
-          const prev = $("ft-prev");
-          if (prev && res.preview) {
-            prev.hidden = false;
-            prev.src = `data:image/${res.preview_ext || "png"};base64,${res.preview}`;
-          }
-          this._toast(res.displayed ? "Scritta sul display ✓" : "Pronta, ma invio fallito", !res.displayed);
-        } catch (e) {
-          this._toast("Errore: " + ((e && e.message) || e), true);
-        } finally { this._setBusy(false); }
-      };
-      const ftReapply = () => {
-        if (($("ft-text").value || "").trim() || ($("ft-ent").value || "").trim()) sendFree();
-      };
-      $("ft-send").addEventListener("click", sendFree);
-      $("ft-clear").addEventListener("click", () => this._restoreComposition());
-      $("ft-text").addEventListener("keydown", (e) => { if (e.key === "Enter") sendFree(); });
-      $("ft-ent").addEventListener("change", ftReapply);
-      const ftChips = (cls, key) =>
-        this.shadowRoot.querySelectorAll("." + cls).forEach((c) =>
-          c.addEventListener("click", () => {
-            this._ftOpt[key] = c.dataset.v;
-            this.shadowRoot.querySelectorAll("." + cls).forEach((x) =>
-              x.classList.toggle("active", x === c));
-            ftReapply();
-          }));
-      ftChips("ftx", "pos_x");
-      ftChips("fty", "pos_y");
-      ftChips("ftm", "motion");
+      // La card "Scritta libera" è stata rimossa: Grandezza/Velocità/
+      // Arcobaleno (globali della riga che scorre) vivono ora in "Stile
+      // del testo"; il loro aggancio è qui sopra (fsize/speed/rainbow).
     }
 
     // --- Galleria
@@ -2212,26 +2289,13 @@ class IPixelPanel extends HTMLElement {
         return Math.min(hi, Math.max(lo, Math.round(n)));
       };
       const wsRot = async (action) => {
-        const perEnt = $("rot-comp-u").value === "ent";
-        const cu = perEnt ? 1 : (parseInt($("rot-comp-u").value, 10) || 60);
-        const au = parseInt($("rot-anim-u").value, 10) || 1;
-        const ku = parseInt($("rot-clock-u").value, 10) || 1;
-        const compS = perEnt
-          ? clamp(parseFloat(($("rot-comp").value || "10").replace(",", ".")), 2, 600, 10)
-          : clamp(parseFloat(($("rot-comp").value || "5").replace(",", ".")) * cu, 30, 3600, 300);
-        const animS = clamp(parseFloat(($("rot-anim-s").value || "60").replace(",", ".")) * au, 10, 600, 60);
-        const clockS = clamp(parseFloat(($("rot-clock-s").value || "60").replace(",", ".")) * ku, 10, 3600, 60);
-        const useS = $("rot-use-s").checked, useA = $("rot-use-a").checked, useC = $("rot-use-c").checked;
-        if (action === "start" && !useS && !useA && !useC)
-          return this._toast("Spunta almeno una casella", true);
+        if (action === "start" && !(this._playlist || []).length)
+          return this._toast("Aggiungi almeno un passo alla scaletta", true);
         this._setBusy(true);
         try {
           await this._hass.callWS({
             type: "ipixel_color/timer", address: this._dev.address,
             action, mode: "rotation", seconds: 60,
-            anim: $("rot-anim").value, comp_seconds: compS, anim_seconds: animS,
-            clock_seconds: clockS, comp_per_entity: perEnt,
-            use_sensors: useS, use_anim: useA, use_clock: useC,
           });
           this._toast(action === "start" ? "Rotazione avviata ✓" : "Rotazione fermata ✓");
         } catch (e) { this._toast("Errore: " + (e.message || e), true); }
@@ -2447,12 +2511,31 @@ class IPixelPanel extends HTMLElement {
       $("clock-it-on").addEventListener("click", () => wsClock("start"));
       $("clock-it-off").addEventListener("click", () => wsClock("stop"));
       // La tendina ricorda l'ultimo stile scelto
+      // Grandezza = altezza in pixel (5..16). Converte le vecchie
+      // etichette s/m/g e dà un'etichetta a parole allo slider.
+      const sizeToPx = (s) => {
+        if (s == null) return 7;
+        if (typeof s === "number") return s;
+        const map = { s: 5, m: 7, g: 14 };
+        return map[s] != null ? map[s] : (parseInt(s, 10) || 7);
+      };
+      const sizeWord = (v) =>
+        v <= 6 ? "mini" : v <= 9 ? "piccola" : v <= 12 ? "media" : "grande";
       this._hass.callWS({
         type: "ipixel_color/status", address: this._dev.address,
       }).then((st) => {
         if (st.clock_style) $("clock-it-style").value = st.clock_style;
         if (st.clock_icon) $("clock-icon").value = st.clock_icon;
         if (st.clock_icon_color) $("clock-icon-color").value = "#" + st.clock_icon_color;
+        this._clkSize = sizeToPx(st.clock_size);
+        if ($("clk-size")) {
+          $("clk-size").value = this._clkSize;
+          $("clk-size-v").textContent = sizeWord(this._clkSize);
+        }
+        if ($("clk-gap")) {
+          $("clk-gap").value = st.clock_gap == null ? 2 : st.clock_gap;
+          $("clk-gap-v").textContent = $("clk-gap").value;
+        }
       }).catch(() => {});
       const saveClockStyle = async () => {
         // Ricorda subito la scelta (vale anche per la fase orologio
@@ -2463,6 +2546,8 @@ class IPixelPanel extends HTMLElement {
             clock_style: $("clock-it-style").value,
             icon: ($("clock-icon").value || "heart").trim(),
             icon_color: $("clock-icon-color").value.slice(1),
+            size: parseInt(this._clkSize, 10) || 7,
+            gap: parseInt(($("clk-gap") && $("clk-gap").value) || "2", 10) || 0,
           });
         } catch (e) { /* server vecchio: lo salva comunque l'avvio */ }
         // Se l'orologio è in moto, riparte subito con le scelte nuove
@@ -2489,6 +2574,19 @@ class IPixelPanel extends HTMLElement {
       };
       $("clock-icon").addEventListener("change", saveWithStyleO);
       $("clock-icon-color").addEventListener("change", saveWithStyleO);
+      if ($("clk-size")) {
+        $("clk-size").addEventListener("input", () => {
+          this._clkSize = parseInt($("clk-size").value, 10);
+          $("clk-size-v").textContent = sizeWord(this._clkSize);
+        });
+        $("clk-size").addEventListener("change", saveClockStyle);
+      }
+      if ($("clk-gap")) {
+        $("clk-gap").addEventListener("input", () => {
+          $("clk-gap-v").textContent = $("clk-gap").value;
+        });
+        $("clk-gap").addEventListener("change", saveClockStyle);
+      }
     }
 
     // --- Immagine: memoria del display (slot di bordo)
@@ -2589,51 +2687,8 @@ class IPixelPanel extends HTMLElement {
           this._toast("Errore: " + (e.message || e), true);
         } finally { this._setBusy(false); }
       });
-      this._iconOpt = this._iconOpt || { pos_x: "center", pos_y: "center", motion: "none" };
-      const sendIcon = async () => {
-        const name = ($("icon-name").value || "").trim().replace(/^mdi:/, "");
-        if (!name) return this._toast("Scrivi il nome dell'icona", true);
-        if (this._busy) return this._toast("Attendi: invio ancora in corso…", true);
-        this._setBusy(true);
-        try {
-          const res = await this._hass.callWS({
-            type: "ipixel_color/show_icon", address: this._dev.address,
-            icon: name, color: $("icon-color").value.slice(1),
-            size: parseInt($("icon-size").value, 10) || 16,
-            pos_x: this._iconOpt.pos_x, pos_y: this._iconOpt.pos_y,
-            motion: this._iconOpt.motion,
-          });
-          const prev = $("icon-prev");
-          if (prev && res.preview) {
-            prev.hidden = false;
-            prev.src = `data:image/${res.preview_ext || "png"};base64,${res.preview}`;
-          }
-          this._toast(res.displayed ? "Icona sul display ✓" : "Icona pronta, ma invio fallito", !res.displayed);
-        } catch (e) {
-          this._toast("Errore: " + ((e && e.message) || e), true);
-        } finally { this._setBusy(false); }
-      };
-      const reapply = () => { if (($("icon-name").value || "").trim()) sendIcon(); };
-      $("send-icon").addEventListener("click", sendIcon);
-      $("icon-clear").addEventListener("click", () => this._restoreComposition());
-      $("icon-name").addEventListener("keydown", (e) => { if (e.key === "Enter") sendIcon(); });
-      // Ogni regolazione si applica da sola
-      $("icon-color").addEventListener("change", reapply);
-      $("icon-size").addEventListener("input", () => {
-        $("icon-size-v").textContent = $("icon-size").value;
-      });
-      $("icon-size").addEventListener("change", reapply);
-      const chipGroup = (cls, key) =>
-        this.shadowRoot.querySelectorAll("." + cls).forEach((c) =>
-          c.addEventListener("click", () => {
-            this._iconOpt[key] = c.dataset.v;
-            this.shadowRoot.querySelectorAll("." + cls).forEach((x) =>
-              x.classList.toggle("active", x === c));
-            reapply();
-          }));
-      chipGroup("ipx", "pos_x");
-      chipGroup("ipy", "pos_y");
-      chipGroup("imv", "motion");
+      // La card "Icona" a schermo intero è stata rimossa: ora le icone e
+      // le emoji si aggiungono come caselle della griglia (scorrono col testo).
     }
 
     // --- Colori
@@ -2825,19 +2880,28 @@ class IPixelPanel extends HTMLElement {
   }
 
   _loadImage(fileObj) {
-    if (fileObj.size > 3 * 1024 * 1024)
-      return this._toast("File troppo grande (max 3 MB)", true);
-    const isGif = /\.gif$/i.test(fileObj.name) || fileObj.type === "image/gif";
+    if (fileObj.size > 15 * 1024 * 1024)
+      return this._toast("File troppo grande (max 15 MB)", true);
     this._gifB64 = null;
+    this._gifFile = null;
     const cvPrev = this.shadowRoot.getElementById("preview");
     const oldGif = this.shadowRoot.getElementById("gifprev");
 
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = reader.result;
+      const b64 = (dataUrl.split(",")[1]) || "";
+      // Dal telefono la GIF arriva spesso senza ".gif" nel nome e senza
+      // tipo "image/gif": la riconosciamo dai primi byte del file, perche'
+      // ogni GIF comincia con "GIF8" (in base64: "R0lG").
+      const isGif = b64.startsWith("R0lG")
+        || /\.gif$/i.test(fileObj.name || "")
+        || fileObj.type === "image/gif";
       if (isGif) {
-        // GIF animata: niente canvas (la appiattirebbe), anteprima con <img>
-        this._gifB64 = dataUrl.split(",")[1];
+        // GIF animata: niente canvas (la appiattirebbe), anteprima con <img>;
+        // per l'invio tengo il File GREZZO (va via HTTP, non base64 sul WS)
+        this._gifFile = fileObj;
+        this._gifB64 = b64;
         if (cvPrev) cvPrev.hidden = true;
         let gp = oldGif;
         if (!gp && cvPrev) {
@@ -2886,12 +2950,35 @@ class IPixelPanel extends HTMLElement {
     if (!this._dev) return;
     if (this._busy) return this._toast("Attendi: invio ancora in corso…", true);
     this._toast("Invio in corso…");
-    if (this._gifB64) {
-      // GIF animata: bytes originali, la ridimensiona il motore lato server
-      await this._call("ipixel_color", "display_image", {
-        address: this._dev.address, image: this._gifB64,
-        resize_method: this._resizeMethod, file_extension: ".gif",
-      });
+    if (this._gifFile || this._gifB64) {
+      // GIF/animazione: byte GREZZI via HTTP. Il WebSocket di HA si ferma a
+      // 4 MiB e il base64 gonfia il file di 4/3 → le GIF grandi non ci
+      // passano; il body HTTP arriva a 16 MiB.
+      this._setBusy(true);
+      try {
+        const body = this._gifFile
+          ? this._gifFile
+          : Uint8Array.from(atob(this._gifB64), (c) => c.charCodeAt(0));
+        const tok = this._authToken();
+        const qs = "address=" + encodeURIComponent(this._dev.address) +
+          "&resize_method=" + encodeURIComponent(this._resizeMethod);
+        const resp = await fetch("/api/ipixel_color/upload?" + qs, {
+          method: "POST",
+          headers: tok ? { Authorization: "Bearer " + tok } : {},
+          body,
+        });
+        let j = {};
+        try { j = await resp.json(); } catch (e) { /* no body */ }
+        if (!resp.ok) {
+          return this._toast(j.error || ("Invio fallito (" + resp.status + ")"), true);
+        }
+        this._toast(
+          j.displayed ? "Fatto ✓"
+            : "Inviata, ma il display non l'ha mostrata (collegamento liberato?)",
+          !j.displayed);
+      } catch (e) {
+        this._toast("Invio fallito: " + (e.message || e), true);
+      } finally { this._setBusy(false); }
       return;
     }
     const canvas = this.shadowRoot.getElementById("preview");
@@ -2952,14 +3039,14 @@ class IPixelPanel extends HTMLElement {
       this._updateSimFromState();
     }
 
-    if (this._page === "orologio") {
+    if (this._page === "orologio" || this._page === "testo") {
       chipSel("clock-chip", this._val("select", "clock_style", "1"));
       chkIf("c24", this._val("switch", "clock_24h") === "on");
       chkIf("cdate", this._val("switch", "clock_show_date") === "on");
       this._updateSimFromState();
     }
 
-    if (this._page === "immagine") chipSel("rez-chip", this._resizeMethod);
+    if (this._page === "immagine" || this._page === "testo") chipSel("rez-chip", this._resizeMethod);
 
     if (this._page === "colori") {
       const toHex = (st) => {

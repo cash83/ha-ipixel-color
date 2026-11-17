@@ -77,6 +77,51 @@ def composition_entity_ids(items: list[dict[str, Any]]) -> list[str]:
     ]
 
 
+def _format_item(hass: HomeAssistant, item: dict[str, Any],
+                 with_icon: bool = True) -> str:
+    """Testo di una casella (o di un sotto-sensore 'below'): etichetta +
+    valore + unità, con l'eventuale icona davanti. Vale sia per le caselle
+    'entity' sia per quelle 'text'."""
+    if item.get("type", "entity") == "text":
+        return (item.get("text") or "").strip()
+
+    entity_id = item.get("entity_id")
+    if not entity_id:
+        return ""
+    state = hass.states.get(entity_id)
+
+    value = "?"
+    if state and state.state not in ("unknown", "unavailable", ""):
+        value = state.state
+        decimals = item.get("decimals", 1)
+        try:
+            value = f"{float(value):.{int(decimals)}f}".replace(".", ",")
+        except (ValueError, TypeError):
+            pass
+
+    unit = ""
+    if item.get("show_unit") and state:
+        unit = state.attributes.get("unit_of_measurement") or ""
+        unit = unit.replace("°", "").strip()  # i gradi resi male dal display
+
+    label = (item.get("label") or "").strip()
+    text = f"{label} {value}" if label else value
+    if unit:
+        text = f"{text}{unit}"
+
+    if with_icon:
+        # chiave assente = icona automatica dal tipo; "" = tolta apposta
+        icon = item.get("icon")
+        if icon is None:
+            icon = default_icon_for(entity_id, state)
+        icon = (icon or "").strip()
+        if icon:
+            gap = item.get("icon_gap")
+            gap = 1 if gap is None else max(0, int(gap))
+            text = f"{icon}{' ' * gap}{text}"
+    return text
+
+
 def build_text(
     hass: HomeAssistant,
     items: list[dict[str, Any]],
@@ -90,59 +135,25 @@ def build_text(
     for item in items:
         if not item.get("enabled", True):
             continue
-        kind = item.get("type", "entity")
-
-        if kind == "text":
-            text = (item.get("text") or "").strip()
-            if text:
-                parts.append(text)
-            continue
-
-        entity_id = item.get("entity_id")
-        if not entity_id:
-            continue
-        state = hass.states.get(entity_id)
-
-        value = "?"
-        if state and state.state not in ("unknown", "unavailable", ""):
-            value = state.state
-            decimals = item.get("decimals", 1)
-            try:
-                number = float(value)
-                value = f"{number:.{int(decimals)}f}".replace(".", ",")
-            except (ValueError, TypeError):
-                pass
-
-        unit = ""
-        if item.get("show_unit") and state:
-            unit = state.attributes.get("unit_of_measurement") or ""
-            # Il simbolo dei gradi viene reso male dal display
-            unit = unit.replace("°", "").strip()
-
-        label = (item.get("label") or "").strip()
-        segment = f"{label} {value}" if label else value
-        if unit:
-            segment = f"{segment}{unit}"
-
-        # Icona della casella: chiave assente = automatica dal tipo di
-        # sensore; stringa vuota = l'utente l'ha tolta apposta
-        icon = item.get("icon")
-        if icon is None:
-            icon = default_icon_for(entity_id, state)
-        icon = (icon or "").strip()
-        if icon:
-            segment = f"{icon} {segment}"
-        parts.append(segment)
-
+        text = _format_item(hass, item, with_icon=True)
+        if text:
+            parts.append(text)
     return separator.join(parts)
 
 
 def has_custom_segments(items: list[dict[str, Any]]) -> bool:
-    """True se qualche casella ha grandezza o posizione proprie."""
+    """True se qualche casella ha grandezza, posizione, distanza o un
+    secondo sensore impilato (serve il percorso a segmenti, non il testo
+    unico)."""
     for item in items:
         if not item.get("enabled", True):
             continue
         if item.get("size") or (item.get("valign") or "center") != "center":
+            return True
+        if item.get("gap") is not None or item.get("voff") is not None:
+            return True
+        below = item.get("below")
+        if isinstance(below, dict) and below.get("entity_id"):
             return True
     return False
 
@@ -155,51 +166,48 @@ def build_segments(
     default_size: int | None = None,
 ) -> list[dict[str, Any]]:
     """Come build_text, ma un segmento per casella: ognuno con la sua
-    grandezza ("size", px) e posizione verticale ("valign")."""
+    grandezza ("size", px), posizione ("voff" px dall'alto, o "valign") e,
+    se presente, un SECONDO sensore ("below") impilato sotto nello stesso
+    spazio (due righe da ~7px)."""
     segments: list[dict[str, Any]] = []
     enabled = [it for it in items if it.get("enabled", True)]
     for idx, item in enumerate(enabled):
-        kind = item.get("type", "entity")
+        text = _format_item(hass, item, with_icon=True)
 
-        if kind == "text":
-            text = (item.get("text") or "").strip()
-        else:
-            entity_id = item.get("entity_id")
-            if not entity_id:
-                continue
-            state = hass.states.get(entity_id)
-            value = "?"
-            if state and state.state not in ("unknown", "unavailable", ""):
-                value = state.state
-                decimals = item.get("decimals", 1)
-                try:
-                    number = float(value)
-                    value = f"{number:.{int(decimals)}f}".replace(".", ",")
-                except (ValueError, TypeError):
-                    pass
-            unit = ""
-            if item.get("show_unit") and state:
-                unit = (state.attributes.get("unit_of_measurement") or "")
-                unit = unit.replace("°", "").strip()
-            label = (item.get("label") or "").strip()
-            text = f"{label} {value}" if label else value
-            if unit:
-                text = f"{text}{unit}"
-            icon = item.get("icon")
-            if icon is None:
-                icon = default_icon_for(entity_id, state)
-            icon = (icon or "").strip()
-            if icon:
-                text = f"{icon} {text}"
+        stack_text = None
+        below = item.get("below")
+        if isinstance(below, dict) and below.get("entity_id"):
+            stack_text = _format_item(hass, below, with_icon=True)
 
-        if not text:
+        if not text and not stack_text:
             continue
-        if idx < len(enabled) - 1:
-            text += separator
-        segments.append({
+
+        gap = item.get("gap")
+        last = idx >= len(enabled) - 1
+        seg: dict[str, Any] = {
             "text": text,
             "color": item.get("color") or default_color,
             "size": int(item.get("size") or default_size or 0) or None,
             "valign": item.get("valign") or "center",
-        })
+        }
+        voff = item.get("voff")
+        if voff is not None:
+            try:
+                seg["voff"] = int(voff)
+            except (ValueError, TypeError):
+                pass
+
+        if stack_text is not None:
+            # coppia impilata: riga sotto con colore proprio; la distanza
+            # dopo è gestita in rendering
+            seg["stack_text"] = stack_text
+            seg["stack_color"] = below.get("color") or default_color
+            seg["gap_after"] = 0 if last else (
+                int(gap) if gap is not None else len(separator))
+        elif not last:
+            # segmento singolo: la distanza è negli spazi in coda al testo
+            seg["text"] = text + (
+                " " * max(0, int(gap)) if gap is not None else separator)
+
+        segments.append(seg)
     return segments

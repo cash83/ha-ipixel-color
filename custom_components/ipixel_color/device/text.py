@@ -24,7 +24,7 @@ except ImportError:
 # I blocchi emoji sono JPEG a misura fissa (16x16): l'unico modo di
 # ridurle/spostarle è disegnarle più piccole DENTRO il quadrato.
 # EMOJI_OPTS viene impostato attorno a ogni codifica.
-EMOJI_OPTS: dict[str, Any] = {"px": None, "valign": "center"}
+EMOJI_OPTS: dict[str, Any] = {"px": None, "valign": "center", "y": None}
 
 try:
     from pypixelcolor.commands.send_text import image_processing as _pp_ip
@@ -42,13 +42,18 @@ try:
 
         canvas = _Img.new("RGB", (size, size), (0, 0, 0))
         x = (size - img.width) // 2
-        valign = EMOJI_OPTS.get("valign") or "center"
-        if valign == "top":
-            y = 0
-        elif valign == "bottom":
-            y = size - img.height
+        yopt = EMOJI_OPTS.get("y")
+        if yopt is not None:
+            y = int(yopt)                       # posizione esatta (voff): segue il testo
         else:
-            y = (size - img.height) // 2
+            valign = EMOJI_OPTS.get("valign") or "center"
+            if valign == "top":
+                y = 0
+            elif valign == "bottom":
+                y = size - img.height
+            else:
+                y = (size - img.height) // 2
+        y = max(0, min(y, size - img.height))
         if img.mode == "RGBA":
             canvas.paste(img, (x, y), img)
         else:
@@ -124,6 +129,291 @@ def _valign_offset(block_height: int, size_px: int, valign: str) -> int:
     return (block_height - size_px) // 2
 
 
+def _hcat(a, b):
+    """Affianca due immagini L (stessa altezza)."""
+    from PIL import Image
+    c = Image.new("L", (a.width + b.width, a.height), 0)
+    c.paste(a, (0, 0))
+    c.paste(b, (a.width, 0))
+    return c
+
+
+def _jpeg_tile_block(tile, block_height=16):
+    """Una tile RGB 16x16 → blocco emoji JPEG, STESSO formato di
+    pypixelcolor (q95, subsampling 0, senza header JFIF) così il firmware
+    la rende come una qualsiasi emoji."""
+    from io import BytesIO
+    from pypixelcolor.commands.send_text.encoding import encode_emoji_block
+    buf = BytesIO()
+    tile.convert("RGB").save(buf, format="JPEG", quality=95,
+                             subsampling=0, optimize=True)
+    jb = buf.getvalue()
+    if jb[2:4] == b"\xff\xe0":                 # togli l'header JFIF
+        dqt = jb.find(b"\xff\xdb")
+        if dqt > 0:
+            jb = b"\xff\xd8" + jb[dqt:]
+    return encode_emoji_block(jb, block_height)
+
+
+def _render_line_rgb(canvas, text, color_hex, font_name, lh, y0):
+    """Disegna una riga (icone emoji a colori + testo colorato) sul canvas
+    RGB a quota y0. Ritorna la larghezza occupata."""
+    from pypixelcolor.lib.emoji_manager import is_emoji, get_emoji_image
+    from ..display.text_renderer import render_text_sprite
+
+    sp = max(2, round(lh * 0.5))
+    x = 0
+    runs, cur = [], ""
+    for ch in text:
+        if is_emoji(ch):
+            if cur:
+                runs.append(("t", cur))
+                cur = ""
+            runs.append(("e", ch))
+        else:
+            cur += ch
+    if cur:
+        runs.append(("t", cur))
+
+    for kind, val in runs:
+        if kind == "e":
+            im = get_emoji_image(val, size=lh)
+            if im is not None:
+                im = im.convert("RGBA")
+                canvas.paste(im, (x, y0), im)
+                x += im.width + 1
+            continue
+        lead = len(val) - len(val.lstrip(" "))
+        trail = len(val) - len(val.rstrip(" "))
+        core = val.strip(" ")
+        x += lead * sp
+        if core:
+            spr = render_text_sprite(core, lh, color_hex, font_name)  # RGBA
+            canvas.paste(spr, (x, y0), spr)
+            x += spr.width
+        x += trail * sp
+    return x
+
+
+def _encode_stacked_rgb(top, top_color, bottom, bottom_color, font_name,
+                        gap_after=0, block_height=16):
+    """Due sensori IMPILATI, a COLORI: la riga di sopra (top_color) e quella
+    di sotto (bottom_color), ciascuna ~7px con le sue icone, rese come
+    immagine e affettate in tile 16x16 mandate come blocchi emoji JPEG
+    (colore vero pixel-per-pixel). Ritorna (bytes, numero_blocchi)."""
+    from PIL import Image
+
+    lh = 7
+    wide = Image.new("RGB", (1024, block_height), (0, 0, 0))
+    wt = _render_line_rgb(wide, (top or "").strip(), top_color, font_name, lh, 0)
+    wb = _render_line_rgb(wide, (bottom or "").strip(), bottom_color,
+                          font_name, lh, block_height - lh)
+    w = max(wt, wb, 1) + max(0, int(gap_after)) * 2
+    w = min(w, 1024)
+    canvas = wide.crop((0, 0, w, block_height))
+
+    out = bytearray()
+    n = 0
+    x = 0
+    while x < canvas.width:
+        tile = canvas.crop((x, 0, min(x + 16, canvas.width), block_height))
+        if tile.width < 16:
+            pad = Image.new("RGB", (16, block_height), (0, 0, 0))
+            pad.paste(tile, (0, 0))
+            tile = pad
+        out.extend(_jpeg_tile_block(tile, block_height))
+        n += 1
+        x += 16
+    return bytes(out), n
+
+
+def _encode_small_segment(text, color_hex, size_px, valign, font_name,
+                          block_height=16, y0=None):
+    """Casella rimpicciolita resa NITIDA.
+
+    Le parti di testo vengono disegnate con render_text_sprite
+    (sovracampionato 4x + soglia: piccole ma leggibili, niente glifi
+    impastati), appoggiate su un'immagine alta `block_height` alla
+    posizione verticale voluta e affettate in strisce da 8px, ognuna un
+    blocco-carattere 8x16 come quello che il firmware vede da sempre
+    (verificato: byte identici). Le emoji restano blocchi emoji, gia'
+    scalati via EMOJI_OPTS dal chiamante. Gli spazi (anche la "distanza
+    icona") diventano colonne vuote. Ritorna (bytes, numero_blocchi).
+    """
+    from PIL import Image
+    from pypixelcolor.lib.emoji_manager import is_emoji
+    from pypixelcolor.commands.send_text.image_processing import (
+        encode_char_img, emoji_to_hex)
+    from pypixelcolor.commands.send_text.encoding import (
+        encode_character_block, encode_emoji_block,
+        _logic_reverse_bits_order_bytes)
+    from ..display.text_renderer import render_text_sprite
+
+    color_bytes = bytes.fromhex(color_hex)
+    out = bytearray()
+    n = 0
+
+    if y0 is None:
+        if valign == "top":
+            y0 = 0
+        elif valign == "bottom":
+            y0 = max(0, block_height - size_px)
+        else:
+            y0 = max(0, (block_height - size_px) // 2)
+    y0 = max(0, min(int(y0), max(0, block_height - size_px)))
+    space_px = max(2, round(size_px * 0.45))
+
+    runs = []
+    cur = ""
+    for ch in text:
+        if is_emoji(ch):
+            if cur:
+                runs.append(("text", cur))
+                cur = ""
+            runs.append(("emoji", ch))
+        else:
+            cur += ch
+    if cur:
+        runs.append(("text", cur))
+
+    strip = {"img": None}  # colonne di testo accumulate (non spezzo agli spazi)
+
+    def _emit(canvas):
+        nonlocal n
+        x = 0
+        while x < canvas.width:
+            col = canvas.crop((x, 0, min(x + 8, canvas.width), block_height))
+            if col.width < 8:
+                pad = Image.new("L", (8, block_height), 0)
+                pad.paste(col, (0, 0))
+                col = pad
+            cb = _logic_reverse_bits_order_bytes(encode_char_img(col))
+            out.extend(encode_character_block(cb, block_height, color_bytes))
+            n += 1
+            x += 8
+
+    def _flush():
+        if strip["img"] is not None and strip["img"].width:
+            _emit(strip["img"])
+        strip["img"] = None
+
+    def _append(seg_img):
+        strip["img"] = seg_img if strip["img"] is None else _hcat(strip["img"], seg_img)
+
+    for kind, val in runs:
+        if kind == "emoji":
+            _flush()
+            eb = emoji_to_hex(val, block_height)
+            if eb:
+                out.extend(encode_emoji_block(eb, block_height))
+                n += 1
+            continue
+        lead = len(val) - len(val.lstrip(" "))
+        trail = len(val) - len(val.rstrip(" "))
+        core = val.strip(" ")
+        if lead:
+            _append(Image.new("L", (lead * space_px, block_height), 0))
+        if core:
+            spr = render_text_sprite(core, size_px, color_hex, font_name)
+            mask = spr.split()[3]
+            canvas = Image.new("L", (mask.width, block_height), 0)
+            canvas.paste(255, (0, y0), mask)
+            _append(canvas)
+        if trail:
+            _append(Image.new("L", (trail * space_px, block_height), 0))
+    _flush()
+    return bytes(out), n
+
+
+def render_segments_image(segments, font="CUSONG", block_height=16):
+    """Rende la composizione come IMMAGINE RGB (la striscia intera, 16 alta),
+    con gli STESSI criteri del display: caselle piene per-carattere col font
+    scelto, caselle piccole con lo sprite 7x5 alla posizione/colore giusti,
+    coppie impilate a due righe colorate con icone. Serve all'anteprima del
+    pannello per rispecchiare davvero lo schermo. Ritorna una PIL.Image."""
+    from PIL import Image
+    from pypixelcolor.commands.send_text.font_utils import resolve_font_config
+    from pypixelcolor.commands.send_text.image_processing import char_to_hex
+    from pypixelcolor.lib.emoji_manager import is_emoji, get_emoji_image
+
+    base_cfg = resolve_font_config(font)
+    base_m = dict(base_cfg.get_metrics(block_height))
+
+    def _full_image(text, color_hex):
+        r, g, b = (int(color_hex[0:2], 16), int(color_hex[2:4], 16),
+                   int(color_hex[4:6], 16))
+        parts = []
+        for ch in text:
+            if is_emoji(ch):
+                im = get_emoji_image(ch, block_height)
+                parts.append(im.convert("RGB") if im
+                             else Image.new("RGB", (block_height, block_height), (0, 0, 0)))
+                continue
+            raw = char_to_hex(ch, block_height, base_cfg.path, base_m["offset"],
+                              base_m["font_size"], base_m["pixel_threshold"])
+            cell = Image.new("RGB", (8, block_height), (0, 0, 0))
+            if raw:
+                px = cell.load()
+                for row in range(block_height):
+                    byte = raw[row] if row < len(raw) else 0
+                    for c in range(8):
+                        if (byte >> (7 - c)) & 1:
+                            px[c, row] = (r, g, b)
+            parts.append(cell)
+        if not parts:
+            return Image.new("RGB", (1, block_height), (0, 0, 0))
+        w = sum(p.width for p in parts)
+        img = Image.new("RGB", (w, block_height), (0, 0, 0))
+        x = 0
+        for p in parts:
+            img.paste(p, (x, 0))
+            x += p.width
+        return img
+
+    strips = []
+    for seg in segments:
+        text = str(seg.get("text") or "")
+        stack = seg.get("stack_text")
+        color = str(seg.get("color") or "ffffff").lstrip("#")
+        if stack is not None:
+            lh = 7
+            wide = Image.new("RGB", (1024, block_height), (0, 0, 0))
+            wt = _render_line_rgb(wide, text.strip(), color, "7x5.ttf", lh, 0)
+            scol = str(seg.get("stack_color") or color).lstrip("#")
+            wb = _render_line_rgb(wide, stack.strip(), scol, "7x5.ttf", lh,
+                                  block_height - lh)
+            w = max(wt, wb, 1) + max(0, int(seg.get("gap_after") or 0)) * 2
+            strips.append(wide.crop((0, 0, min(w, 1024), block_height)))
+            continue
+        if not text:
+            continue
+        size_px = int(seg.get("size") or block_height)
+        size_px = max(5, min(size_px, block_height))
+        if size_px >= block_height:
+            strips.append(_full_image(text, color))
+        else:
+            voff = seg.get("voff")
+            if voff is not None:
+                y0 = max(0, min(int(voff), block_height - size_px))
+            else:
+                y0 = max(0, min(_valign_offset(block_height, size_px,
+                                               seg.get("valign") or "center"),
+                                block_height - size_px))
+            wide = Image.new("RGB", (1024, block_height), (0, 0, 0))
+            w = _render_line_rgb(wide, text, color, "7x5.ttf", size_px, y0)
+            strips.append(wide.crop((0, 0, min(max(w, 1), 1024), block_height)))
+
+    if not strips:
+        return Image.new("RGB", (1, block_height), (0, 0, 0))
+    total = sum(s.width for s in strips)
+    img = Image.new("RGB", (total, block_height), (0, 0, 0))
+    x = 0
+    for s in strips:
+        img.paste(s, (x, 0))
+        x += s.width
+    return img
+
+
 def make_text_command_mixed(
     segments: list[dict[str, Any]],
     font: str = "CUSONG",
@@ -163,16 +453,32 @@ def make_text_command_mixed(
 
     for seg in segments:
         text = str(seg.get("text") or "")
-        if not text:
+        stack_text = seg.get("stack_text")
+        if not text and not stack_text:
             continue
         color = str(seg.get("color") or "ffffff").lstrip("#")
         if first_color is None:
             first_color = color
+
+        if stack_text is not None:
+            # Due sensori IMPILATI, a colori (riga sopra e riga sotto con
+            # colori propri + icone): resa come immagine → tile JPEG.
+            stack_color = str(seg.get("stack_color") or color).lstrip("#")
+            seg_bytes, seg_items = _encode_stacked_rgb(
+                text, color, stack_text, stack_color, "7x5.ttf",
+                int(seg.get("gap_after") or 0), block_height,
+            )
+            items_bytes += seg_bytes
+            num_items += seg_items
+            continue
+
         size_px = int(seg.get("size") or block_height)
         size_px = max(5, min(size_px, block_height))
         valign = str(seg.get("valign") or "center")
+        voff = seg.get("voff")
 
-        if size_px >= block_height:
+        full = size_px >= block_height
+        if full:
             font_size = base_m["font_size"]
             offset = tuple(base_m["offset"])
             emoji_px = None
@@ -185,26 +491,39 @@ def make_text_command_mixed(
                 + _valign_offset(block_height, size_px, valign),
             )
             emoji_px = size_px
+            # posizione verticale effettiva (voff esatto, o dalla valign):
+            # la usa ANCHE l'icona, così segue il testo quando sposti
+            if voff is not None:
+                y0 = max(0, min(int(voff), block_height - size_px))
+            else:
+                y0 = max(0, min(_valign_offset(block_height, size_px, valign),
+                                block_height - size_px))
 
         EMOJI_OPTS["px"] = emoji_px
         EMOJI_OPTS["valign"] = valign
+        EMOJI_OPTS["y"] = None if full else y0
         try:
-            seg_bytes = encode_text(
-                text,
-                block_height,
-                color,
-                base_cfg.path,
-                offset,
-                font_size,
-                base_m["pixel_threshold"],
-                reverse=False,
-            )
+            if full:
+                # Misura piena: percorso per-carattere, IDENTICO a send_text.
+                seg_bytes = encode_text(
+                    text, block_height, color, base_cfg.path,
+                    offset, font_size, base_m["pixel_threshold"], reverse=False,
+                )
+                seg_items = len(text)
+            else:
+                # Rimpicciolita: resa NITIDA con sprite sovracampionato 4x
+                # (font a pixel 7x5), appoggiata alla posizione voluta e
+                # affettata in strisce da 8px. L'emoji segue la stessa y.
+                seg_bytes, seg_items = _encode_small_segment(
+                    text, color, size_px, valign, "7x5.ttf",
+                    block_height=block_height, y0=y0,
+                )
         finally:
             EMOJI_OPTS["px"] = None
             EMOJI_OPTS["valign"] = "center"
+            EMOJI_OPTS["y"] = None
         items_bytes += seg_bytes
-        # Come l'originale: il contatore e' il numero di caratteri
-        num_items += len(text)
+        num_items += seg_items
 
     if not num_items:
         raise ValueError("Niente da mostrare")

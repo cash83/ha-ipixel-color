@@ -530,7 +530,7 @@ class iPIXELAPI:
                 )
                 animation = 1
 
-            from .device.text import make_text_command_mixed
+            from .device.text import make_text_command_mixed, render_segments_image
 
             resolved_font = _resolve_font(font)
 
@@ -567,11 +567,32 @@ class iPIXELAPI:
                 "Mixed text sent: '%s' (%d segmenti, anim=%d, speed=%d)",
                 joined, len(segments), animation, speed,
             )
+            # Anteprima FEDELE: la striscia a colori (stessi pixel del
+            # display), che il pannello fa scorrere al posto dell'emulazione.
+            strip_b64 = None
+            strip_w = 0
+            try:
+                def _strip():
+                    import base64 as _b64
+                    from io import BytesIO as _BIO
+                    im = render_segments_image(
+                        segments, font=resolved_font, block_height=block_height)
+                    buf = _BIO()
+                    im.save(buf, format="PNG")
+                    return _b64.b64encode(buf.getvalue()).decode("ascii"), im.width
+                strip_b64, strip_w = await _asyncio.get_running_loop(
+                ).run_in_executor(None, _strip)
+            except Exception as err:  # l'anteprima non deve mai far fallire l'invio
+                _LOGGER.debug("Striscia anteprima non resa: %s", err)
+
             self._last_media = {
-                "kind": "text",
+                "kind": "strip" if strip_b64 else "text",
                 "text": joined,
                 "color": str(segments[0].get("color") or "ffffff") if segments else "ffffff",
                 "scroll": animation in (1, 2),
+                "b64": strip_b64,
+                "ext": "png",
+                "width": strip_w,
                 "ts": time.time(),
             }
             return True
