@@ -4,6 +4,12 @@
  * hass.callWS / hass.states.
  */
 
+// versione installata: letta dal ?v=<manifest> con cui HA carica il modulo
+const PANEL_VER = (() => {
+  try { return new URL(import.meta.url).searchParams.get("v") || "?"; }
+  catch (e) { return "?"; }
+})();
+
 const PAGES = [
   { id: "testo", label: "Testo", icon: "✍️" },
   { id: "disegno", label: "Disegno", icon: "🖌️" },
@@ -193,6 +199,8 @@ class IPixelPanel extends HTMLElement {
       nav h1 { font-size:17px; margin:4px 16px 14px; font-weight:600; color:#fff;
         text-shadow:0 0 12px var(--neon); letter-spacing:1px; }
       nav h1 em { font-style:normal; color:var(--neon); }
+      nav .ver { margin:-10px 16px 12px; font-size:11px; color:var(--muted);
+        letter-spacing:1px; }
       nav button { display:flex; align-items:center; gap:10px; width:100%;
         padding:12px 16px; background:none; border:none; color:var(--muted);
         font-size:14px; cursor:pointer; text-align:left; border-left:3px solid transparent; }
@@ -265,6 +273,14 @@ class IPixelPanel extends HTMLElement {
       .tile .v { font-size:20px; color:var(--neon); text-shadow:0 0 10px #0ff6;
         font-variant-numeric:tabular-nums; font-weight:600; }
       .tile:not(.sel) .v { color:#39506a; text-shadow:none; }
+      .tile .v1 { display:inline; }
+      .tile .v.stacked { display:flex; flex-direction:column; gap:4px; font-size:18px; }
+      .tile .vrow { display:flex; align-items:center; gap:7px; line-height:1;
+        font-variant-numeric:tabular-nums; text-shadow:0 0 8px currentColor; }
+      .tile .vrow .vic { font-size:15px; width:18px; text-align:center; flex:none;
+        text-shadow:none; }
+      .tile:not(.sel) .v.stacked { opacity:.5; }
+      .tile:not(.sel) .vrow { text-shadow:none; }
       .tile { user-select:none; -webkit-user-select:none; }
       .tile .drag { position:absolute; top:6px; left:8px; color:#39506a; cursor:grab;
         font-size:15px; touch-action:none; padding:2px 5px; }
@@ -287,11 +303,63 @@ class IPixelPanel extends HTMLElement {
       .editor { background:#0a1322; border:1px solid var(--neon); border-radius:12px;
         padding:14px 16px; box-shadow:0 12px 44px #000c, 0 0 16px #0ff3;
         width:100%; max-width:560px; position:relative; }
-      .ed-x { position:absolute; top:8px; right:8px; width:30px; height:30px;
-        line-height:28px; padding:0; border-radius:50%; font-size:17px;
-        background:#0a1322; border:1px solid var(--line); color:var(--fg);
-        cursor:pointer; z-index:2; }
-      .ed-x:hover { border-color:#ff4d6d; color:#ff4d6d; }
+      .ed-x { position:absolute; top:10px; right:10px; width:32px; height:32px;
+        display:grid; place-items:center; padding:0; border-radius:50%;
+        font-size:18px; line-height:1; background:#12203a;
+        border:1px solid var(--line); color:var(--text);
+        cursor:pointer; z-index:60; transition:background .15s, border-color .15s, color .15s; }
+      .ed-x:hover { background:#2a0f1a; border-color:#ff4d6d; color:#ff4d6d; }
+      .ed-actions { justify-content:space-between; gap:10px; margin-top:14px;
+        position:sticky; bottom:0; background:#0a1322; padding:8px 0 2px; z-index:3; }
+      .ed-actions .btn { padding:12px 22px; }
+      .ed-act-right { display:flex; gap:10px; align-items:center; }
+      .ed-preview { margin:2px 0 12px; display:flex; flex-direction:column;
+        align-items:center; gap:5px; }
+      .ed-preview canvas { width:100%; max-width:360px; height:auto;
+        image-rendering:pixelated; background:#05060a; border:1px solid var(--line);
+        border-radius:8px; box-shadow:0 0 14px #0ff2 inset; }
+      .ed-preview span { font-size:10px; letter-spacing:2px; text-transform:uppercase;
+        color:var(--neon); }
+      .edsec { border:1px solid var(--line); border-radius:10px; margin:0 0 10px;
+        overflow:hidden; }
+      .edsec-h { width:100%; text-align:left; background:#0e1a2e; color:var(--text);
+        border:none; padding:12px 14px; font-size:14px; font-weight:600; cursor:pointer;
+        display:flex; align-items:center; justify-content:space-between; gap:8px; }
+      .edsec-h::after { content:"▾"; color:var(--muted); transition:transform .15s;
+        font-size:13px; }
+      .edsec.open > .edsec-h::after { transform:rotate(180deg); }
+      .edsec.open > .edsec-h { color:var(--neon); background:#12233a; }
+      .edsec-h:hover { background:#122339; }
+      .edsec-b { padding:4px 14px 10px; display:none; }
+      .edsec.open > .edsec-b { display:block; }
+      /* selettore sensore cercabile (stile HA) */
+      .ecombo { position:relative; flex:1; min-width:180px; }
+      .ecombo.compact { flex:1 1 180px; min-width:150px; max-width:260px; }
+      .ec-field { display:flex; align-items:center; gap:6px; background:#060a12;
+        border:1px solid var(--line); border-radius:9px; padding:0 10px; }
+      .ec-field:focus-within { border-color:var(--neon); box-shadow:0 0 0 1px #0ff6; }
+      .ec-mag { --mdc-icon-size:18px; color:var(--muted); flex:none; }
+      .ec-input { flex:1; min-width:0 !important; background:none !important;
+        border:none !important; box-shadow:none !important; padding:10px 2px !important;
+        color:var(--text); font-size:14px; outline:none; }
+      /* la tendina NON si ancora alla larghezza del campo: così i nomi
+         non si tagliano quando il campo è compatto (es. "Sensore sotto") */
+      .ec-pop { position:absolute; top:calc(100% + 4px); left:0; right:auto; z-index:50;
+        min-width:min(300px,92vw); width:max-content; max-width:min(92vw,440px);
+        max-height:min(340px,60vh); overflow-y:auto; -webkit-overflow-scrolling:touch;
+        background:#0a1322; border:1px solid var(--neon); border-radius:10px;
+        box-shadow:0 14px 34px #000d, 0 0 14px #0ff3; padding:4px; }
+      .ec-opt { display:flex; align-items:center; gap:10px; padding:9px 10px;
+        border-radius:8px; cursor:pointer; min-height:46px; }
+      .ec-opt:hover, .ec-opt.hi { background:#12263f; }
+      .ec-opt ha-icon { --mdc-icon-size:22px; color:#9beeff; flex:none; width:24px; }
+      .ec-tx { flex:1; min-width:0; display:flex; flex-direction:column; line-height:1.22; }
+      .ec-tx b { font-size:14px; color:#eaf6ff; font-weight:600; overflow:hidden;
+        text-overflow:ellipsis; white-space:nowrap; }
+      .ec-tx small { font-size:11px; color:var(--muted); overflow:hidden;
+        text-overflow:ellipsis; white-space:nowrap; }
+      .ec-dom { font-size:11px; color:var(--muted); flex:none; align-self:center; }
+      .ec-empty { padding:16px; text-align:center; color:var(--muted); font-size:13px; }
       .gal-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:10px; }
       .gal-tile { background:#000; border:1px solid var(--line); border-radius:10px;
         padding:6px; cursor:pointer; transition:transform .12s, box-shadow .15s; }
@@ -323,7 +391,7 @@ class IPixelPanel extends HTMLElement {
         .layout { flex-direction:column; }
         nav { width:100%; display:flex; overflow-x:auto; padding:0; border-right:none;
           border-bottom:1px solid var(--line); }
-        nav h1, .devsel { display:none; }
+        nav h1, nav .ver, .devsel { display:none; }
         nav button { width:auto; border-left:none; border-bottom:3px solid transparent;
           flex:none; }
         nav button.active { border-bottom-color:var(--neon);
@@ -343,6 +411,7 @@ class IPixelPanel extends HTMLElement {
       <div class="layout">
         <nav>
           <h1>i<em>Pixel</em> <span id="busy"></span></h1>
+          <div class="ver">v${PANEL_VER}</div>
           ${this._devices.length > 1 ? `<select class="devsel" id="devsel">${devOptions}</select>` : ""}
           ${nav}
         </nav>
@@ -459,6 +528,9 @@ class IPixelPanel extends HTMLElement {
       if (!this._simRunning) return;
       const cv = this.shadowRoot && this.shadowRoot.getElementById("sim");
       if (cv) this._drawSim(cv, ts);
+      // mini anteprima nell'editor: stesso ts → lo scroll non avanza due volte
+      const cvEd = this.shadowRoot && this.shadowRoot.getElementById("sim-ed");
+      if (cvEd) this._drawSim(cvEd, ts);
       requestAnimationFrame(step);
     };
     requestAnimationFrame(step);
@@ -492,6 +564,8 @@ class IPixelPanel extends HTMLElement {
       // Striscia della composizione resa dal server: stessi pixel del
       // display, la facciamo scorrere pixel-per-pixel (anteprima FEDELE)
       this._liveKind = "strip";
+      this._simFrame = null;      // la striscia scorre: niente frame statico davanti
+      this._simFrameSrc = null;
       showGif(false);
       const src = `data:image/${res.ext || "png"};base64,${res.b64}`;
       if (this._simStripSrc !== src) {
@@ -645,9 +719,11 @@ class IPixelPanel extends HTMLElement {
       if (!sfits) {
         const speed = parseInt(this._val("number", "text_speed", "50"), 10) || 0;
         const interval = (500 - (speed - 1) * 4.7) * 100 / this._simSpeedPct();
-        if (ts - this._simLast > Math.max(25, interval)) {
+        // timer DEDICATO: non condividere _simLast con l'emulatore a colonne
+        // (gira prima e, azzerando _simLast, bloccava lo scorrimento qui)
+        if (ts - (this._simStripLast || 0) > Math.max(25, interval)) {
           this._simStripOffset = ((this._simStripOffset || 0) + 1) % vw;
-          this._simLast = ts;
+          this._simStripLast = ts;
         }
       } else this._simStripOffset = 0;
       const off = sfits ? 0 : (this._simStripOffset || 0);
@@ -806,7 +882,6 @@ class IPixelPanel extends HTMLElement {
     return `
       <div class="card">
         <h2>Tocca i sensori da mostrare</h2>
-        <datalist id="ent-list">${this._entityDatalist()}</datalist>
         <div class="grid" id="tiles"></div>
         <div id="editor-slot"></div>
         <div class="row" style="margin-top:10px">
@@ -1296,6 +1371,7 @@ class IPixelPanel extends HTMLElement {
         </div>
         <div class="row">
           <button class="btn" id="clock-on">🕒 Attiva orologio</button>
+          <button class="btn sec" id="clock-off">Disattiva</button>
           <button class="btn sec" id="sync-time">Sincronizza ora</button>
         </div>
       </div>
@@ -1419,6 +1495,10 @@ class IPixelPanel extends HTMLElement {
 
   _pageSistema() {
     return `
+      <div class="card" style="display:flex;align-items:center;justify-content:space-between">
+        <h2 style="margin:0">iPixel Color</h2>
+        <span style="color:var(--neon);font-size:14px;letter-spacing:1px">versione installata v${PANEL_VER}</span>
+      </div>
       <div class="card">
         <h2>Alimentazione</h2>
         <div class="row">
@@ -1500,16 +1580,131 @@ class IPixelPanel extends HTMLElement {
 
   /* ============================================ piastrelle (Testo) */
 
-  _entityDatalist() {
-    if (!this._hass) return "";
+  _esc(s) {
+    return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  _domIcon(dom, st) {
+    const a = (st && st.attributes) || {};
+    const dc = a.device_class || "";
+    const unit = a.unit_of_measurement || "";
+    if (dc === "temperature" || unit.includes("°")) return "mdi:thermometer";
+    if (dc === "humidity" || unit === "%") return "mdi:water-percent";
+    if (dc === "power" || unit === "W" || unit === "kW") return "mdi:flash";
+    if (dc === "energy") return "mdi:lightning-bolt";
+    if (dc === "battery") return "mdi:battery";
+    if (dc === "voltage") return "mdi:sine-wave";
+    if (dc === "current") return "mdi:current-ac";
+    if (dom === "binary_sensor") return "mdi:checkbox-blank-circle-outline";
+    if (dom === "counter") return "mdi:counter";
+    if (dom === "number" || dom === "input_number") return "mdi:ray-vertex";
+    return "mdi:gauge";
+  }
+
+  // Elenco entità mostrabili: nome, dispositivo/area, dominio, icona MDI.
+  _entityRows() {
+    if (!this._hass) return [];
+    const H = this._hass;
+    const ents = H.entities || {};
+    const devs = H.devices || {};
+    const areas = H.areas || {};
+    const DLAB = { sensor: "Sensore", binary_sensor: "Sensore", number: "Numero",
+      input_number: "Numero", counter: "Contatore" };
     const rows = [];
-    for (const [id, st] of Object.entries(this._hass.states)) {
+    for (const [id, st] of Object.entries(H.states)) {
       const dom = id.split(".")[0];
       if (!["sensor", "input_number", "number", "counter", "binary_sensor"].includes(dom)) continue;
-      rows.push({ id, name: (st.attributes && st.attributes.friendly_name) || id });
+      const name = (st.attributes && st.attributes.friendly_name) || id;
+      const er = ents[id];
+      let sub = "";
+      if (er) {
+        const dev = er.device_id && devs[er.device_id];
+        if (dev) sub = dev.name_by_user || dev.name || "";
+        if (!sub) {
+          const aid = er.area_id || (dev && dev.area_id);
+          if (aid && areas[aid]) sub = areas[aid].name;
+        }
+      }
+      const icon = (st.attributes && st.attributes.icon) || this._domIcon(dom, st);
+      rows.push({ id, name, sub, dom, domLabel: DLAB[dom] || dom, icon,
+        hay: (name + " " + id + " " + sub).toLowerCase() });
     }
-    rows.sort((a, b) => a.name.localeCompare(b.name));
-    return rows.map((r) => `<option value="${r.id}">${r.name}</option>`).join("");
+    rows.sort((a, b) => a.name.localeCompare(b.name, "it"));
+    return rows;
+  }
+
+  _comboHTML(id, placeholder, compact) {
+    return `<div class="ecombo${compact ? " compact" : ""}" data-combo="${id}">
+      <div class="ec-field"><ha-icon class="ec-mag" icon="mdi:magnify"></ha-icon>
+        <input type="text" class="ec-input" id="${id}" autocomplete="off"
+          placeholder="${this._esc(placeholder)}"></div>
+      <div class="ec-pop" hidden></div>
+    </div>`;
+  }
+
+  // Combobox cercabile in-DOM (funziona anche nell'app, dove il datalist nativo non si apre).
+  _bindEntityPicker(combo, opts) {
+    opts = opts || {};
+    const input = combo.querySelector(".ec-input");
+    const pop = combo.querySelector(".ec-pop");
+    const rows = this._entityRows();
+    let hi = -1;
+    const setSel = (id) => {
+      combo.dataset.id = id || "";
+      const r = rows.find((x) => x.id === id);
+      input.value = r ? r.name : "";
+    };
+    const render = (q) => {
+      q = (q || "").trim().toLowerCase();
+      const terms = q.split(/\s+/).filter(Boolean);
+      let list = terms.length ? rows.filter((r) => terms.every((t) => r.hay.includes(t))) : rows;
+      list = list.slice(0, 80);
+      hi = -1;
+      if (!list.length) {
+        pop.innerHTML = `<div class="ec-empty">Nessun sensore trovato</div>`;
+      } else {
+        pop.innerHTML = list.map((r) =>
+          `<div class="ec-opt" data-id="${this._esc(r.id)}">
+             <ha-icon icon="${this._esc(r.icon)}"></ha-icon>
+             <div class="ec-tx"><b>${this._esc(r.name)}</b><small>${this._esc(r.sub)}</small></div>
+             <span class="ec-dom">${this._esc(r.domLabel)}</span>
+           </div>`).join("");
+      }
+      pop.hidden = false;
+    };
+    const choose = (id) => {
+      setSel(id); pop.hidden = true;
+      if (opts.onPick) opts.onPick(id);
+    };
+    input.addEventListener("focus", () => render(combo.dataset.id ? "" : input.value));
+    input.addEventListener("input", () => { combo.dataset.id = ""; render(input.value); });
+    // mousedown (non click) così scatta prima del blur dell'input
+    pop.addEventListener("mousedown", (e) => {
+      const opt = e.target.closest(".ec-opt");
+      if (!opt) return;
+      e.preventDefault();
+      choose(opt.dataset.id);
+    });
+    input.addEventListener("keydown", (e) => {
+      const opts2 = [...pop.querySelectorAll(".ec-opt")];
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        if (pop.hidden) render(input.value);
+        e.preventDefault();
+        hi += e.key === "ArrowDown" ? 1 : -1;
+        if (hi < 0) hi = opts2.length - 1;
+        if (hi >= opts2.length) hi = 0;
+        opts2.forEach((o, i) => o.classList.toggle("hi", i === hi));
+        if (opts2[hi]) opts2[hi].scrollIntoView({ block: "nearest" });
+      } else if (e.key === "Enter") {
+        if (opts2[hi]) { e.preventDefault(); choose(opts2[hi].dataset.id); }
+      } else if (e.key === "Escape") {
+        pop.hidden = true;
+      }
+    });
+    input.addEventListener("blur", () => setTimeout(() => { pop.hidden = true; }, 150));
+    if (opts.initialId) setSel(opts.initialId);
+    return { input, pop, getId: () => combo.dataset.id || "", setSel };
   }
 
   _guessLabel(entityId) {
@@ -1521,12 +1716,7 @@ class IPixelPanel extends HTMLElement {
     return first.toUpperCase().slice(0, 10);
   }
 
-  _tileIcon(it) {
-    if (it.type === "text") {
-      const t = (it.text || "").trim();
-      return (t && !/[a-zA-Z0-9]/.test(t) && [...t].length <= 4) ? t : "📝";
-    }
-    const st = this._hass && this._hass.states[it.entity_id];
+  _emojiForState(st) {
     const unit = (st && st.attributes && st.attributes.unit_of_measurement) || "";
     const dc = (st && st.attributes && st.attributes.device_class) || "";
     if (dc === "temperature" || unit.includes("°")) return "🌡️";
@@ -1535,6 +1725,22 @@ class IPixelPanel extends HTMLElement {
     if (dc === "battery") return "🔋";
     if (dc === "energy") return "🔌";
     return "📟";
+  }
+
+  _tileIcon(it) {
+    if (it.type === "text") {
+      const t = (it.text || "").trim();
+      return (t && !/[a-zA-Z0-9]/.test(t) && [...t].length <= 4) ? t : "📝";
+    }
+    if (it.icon != null) return it.icon;  // "" = nessuna, impostata a mano
+    return this._emojiForState(this._hass && this._hass.states[it.entity_id]);
+  }
+
+  _belowIcon(it) {
+    const b = it && it.below;
+    if (!b || !b.entity_id) return "";
+    if (b.icon != null) return b.icon;  // icona scelta per il sotto-sensore
+    return this._emojiForState(this._hass && this._hass.states[b.entity_id]);
   }
 
   _tileValue(it) {
@@ -1546,6 +1752,19 @@ class IPixelPanel extends HTMLElement {
     return f.toFixed(it.decimals == null ? 1 : it.decimals).replace(".", ",");
   }
 
+  // valore del secondo sensore (riga impilata sotto), con eventuale unità
+  _belowValue(it) {
+    const b = it && it.below;
+    if (!b || !b.entity_id) return "";
+    const st = this._hass && this._hass.states[b.entity_id];
+    if (!st || ["unknown", "unavailable", ""].includes(st.state)) return "?";
+    const f = parseFloat(st.state);
+    let v = isNaN(f) ? st.state.slice(0, 10)
+      : f.toFixed(b.decimals == null ? 1 : b.decimals).replace(".", ",");
+    const u = (b.show_unit && st.attributes && st.attributes.unit_of_measurement) || "";
+    return v + (u ? " " + u : "");
+  }
+
   _renderTiles() {
     const box = this.shadowRoot.getElementById("tiles");
     if (!box) return;
@@ -1554,9 +1773,16 @@ class IPixelPanel extends HTMLElement {
       <div class="tile ${it.enabled === false ? "" : "sel"}" data-i="${i}">
         <span class="drag" title="Trascina per riordinare">⠿</span>
         <button class="edit" data-i="${i}" title="Modifica">✎</button>
-        <div class="ic">${this._tileIcon(it)}</div>
+        ${it.below && it.below.entity_id ? "" : `<div class="ic">${this._tileIcon(it)}</div>`}
         <b>${it.type === "text" ? "Testo" : (it.label || "—")}</b>
-        <div class="v">${this._tileValue(it)}</div>
+        ${
+          it.below && it.below.entity_id
+            ? `<div class="v stacked">
+                 <span class="vrow"><span class="vic">${this._tileIcon(it)}</span><span class="v1">${this._tileValue(it)}</span></span>
+                 <span class="vrow" style="color:#${String(it.below.color || "00c8ff").replace("#", "")}"><span class="vic">${this._belowIcon(it)}</span><span class="v2">${this._belowValue(it)}</span></span>
+               </div>`
+            : `<div class="v"><span class="v1">${this._tileValue(it)}</span></div>`
+        }
       </div>`).join("");
     box.innerHTML = tiles + `
       <div class="tile addtile" id="add-ent"><span class="plus">+</span>Sensore</div>
@@ -1698,22 +1924,32 @@ class IPixelPanel extends HTMLElement {
     const slot = this.shadowRoot.getElementById("editor-slot");
     if (!slot) return;
     const close = `<button class="ed-x" id="ed-close" title="Chiudi" aria-label="Chiudi">✕</button>`;
+    // mini anteprima dal vivo dentro l'editor (stesso frame del display)
+    const preview = `<div class="ed-preview"><canvas id="sim-ed"></canvas>
+      <span>• anteprima dal vivo</span></div>`;
+    // click sullo sfondo scuro (fuori dal riquadro) = chiudi tenendo le modifiche
+    slot.onclick = (e) => {
+      if (e.target !== slot) return;
+      this._addMode = null; this._editIndex = null; this._editBackupIdx = null;
+      this._renderEditor();
+    };
 
     if (this._addMode === "entity") {
       slot.innerHTML = `<div class="editor">
-        <div class="row"><label>Sensore</label>
-          <input type="text" id="ed-entity" list="ent-list" placeholder="Cerca il sensore..."></div>
+        <div class="row"><label>Sensore</label>${this._comboHTML("ed-entity", "Cerca il sensore…", false)}</div>
         <div class="row"><button class="btn" id="ed-add">Aggiungi</button>${close}</div>
       </div>`;
-      slot.querySelector("#ed-add").addEventListener("click", () => {
-        const eid = slot.querySelector("#ed-entity").value.trim();
+      const combo = slot.querySelector('[data-combo="ed-entity"]');
+      const addEntity = (eid) => {
         if (!eid || !this._hass.states[eid]) return this._toast("Scegli un sensore dalla lista", true);
         if (!this._items) this._items = [];
         this._items.push({ type: "entity", entity_id: eid, label: this._guessLabel(eid), decimals: 1, enabled: true });
         this._addMode = null; this._renderEditor(); this._renderTiles(); this._updateSimFromState(); this._autoSend();
-      });
+      };
+      const picker = this._bindEntityPicker(combo, { onPick: addEntity });
+      slot.querySelector("#ed-add").addEventListener("click", () => addEntity(picker.getId()));
       slot.querySelector("#ed-close").addEventListener("click", () => { this._addMode = null; this._renderEditor(); });
-      slot.querySelector("#ed-entity").focus();
+      picker.input.focus();
       return;
     }
 
@@ -1771,85 +2007,156 @@ class IPixelPanel extends HTMLElement {
     if (this._editIndex == null) { slot.innerHTML = ""; return; }
     const it = this._items[this._editIndex];
     if (!it) { slot.innerHTML = ""; return; }
+    // copia di sicurezza per l'Annulla (le modifiche si applicano dal vivo)
+    if (this._editBackupIdx !== this._editIndex) {
+      this._editBackup = JSON.parse(JSON.stringify(it));
+      this._editBackupIdx = this._editIndex;
+    }
 
     if (it.type === "text") {
-      slot.innerHTML = `<div class="editor">
+      slot.innerHTML = `<div class="editor">${close}${preview}
         <div class="row"><label>Testo</label>
           <input type="text" id="ed-text" value="${(it.text || "").replace(/"/g, "&quot;")}"></div>
         <div class="row"><label>Distanza dopo</label>
           <input type="range" id="ed-gap" min="0" max="8" step="1"
             value="${it.gap == null ? 2 : it.gap}">
           <span class="num" id="ed-gap-v">${it.gap == null ? "normale" : it.gap}</span></div>
-        <div class="row">
+        <div class="row ed-actions">
           <button class="btn sec" id="ed-del" style="color:#ff4d6d;border-color:#ff4d6d">Elimina</button>
-          ${close}</div>
+          <div class="ed-act-right">
+            <button class="btn sec" id="ed-cancel">Annulla</button>
+            <button class="btn" id="ed-save">✓ Salva</button></div></div>
       </div>`;
       slot.querySelector("#ed-text").addEventListener("input", (e) => {
         it.text = e.target.value; this._renderTiles(); this._updateSimFromState(); this._autoSend();
       });
     } else {
-      slot.innerHTML = `<div class="editor">
-        <div class="row"><label>Etichetta</label>
-          <input type="text" id="ed-label" value="${(it.label || "").replace(/"/g, "&quot;")}"></div>
-        <div class="row"><label>Colore</label>
-          <input type="color" id="ed-color"
-            value="${it.color ? "#" + String(it.color).replace("#", "") : "#ffffff"}">
-          <button class="chip" id="ed-color-auto">Generale</button></div>
-        <div class="row"><label>➕ Sensore sotto</label>
-          <input type="text" id="ed-below" list="ent-list" style="max-width:140px"
-            placeholder="2° sensore impilato"
-            value="${it.below && it.below.entity_id ? it.below.entity_id : ""}">
-          <input type="color" id="ed-below-color" title="colore della riga sotto"
-            value="${it.below && it.below.color ? "#" + String(it.below.color).replace("#", "") : "#00c8ff"}">
-          <button class="chip" id="ed-below-clear">Togli</button></div>
-        <p style="color:var(--muted);font-size:12px;margin:4px 0 8px">
-          Un secondo sensore <b>impilato sotto</b> il primo, nello stesso
-          spazio (due righe da 7px che scorrono insieme). Ogni riga ha il
-          <b>suo colore</b> e le sue icone; con un sensore sotto
-          grandezza/posizione non si applicano.</p>
-        <div class="row"><label>Decimali</label>
-          <div class="chips">
-            <button class="chip dec-chip" data-v="0">0</button>
-            <button class="chip dec-chip" data-v="1">1</button>
-            <button class="chip dec-chip" data-v="2">2</button>
-          </div></div>
-        <div class="row"><label>Unità di misura</label><div class="chips">
-          <button class="chip unit-chip" data-v="no">Nascondi</button>
-          <button class="chip unit-chip" data-v="si">Mostra (C, W, %…)</button>
-        </div></div>
-        <div class="row"><label>Icona sul display</label>
-          <input type="text" id="ed-icon" style="max-width:80px"
-            value="${(it.icon == null ? "" : it.icon).replace(/"/g, "&quot;")}"
-            placeholder="${this._autoIcon(this._hass && this._hass.states[it.entity_id], it.entity_id) || "nessuna"}">
-          <button class="chip" id="ed-icon-auto">Auto</button>
-          <button class="chip" id="ed-icon-none">Niente</button></div>
-        <p style="color:var(--muted);font-size:12px;margin:4px 0 8px">
-          L'emoji che scorre davanti al valore. Vuoto = automatica dal
-          tipo di sensore; "Niente" la toglie solo per questa casella.</p>
-        <div class="row"><label>Distanza icona</label>
-          <input type="range" id="ed-icon-gap" min="0" max="5" step="1"
-            value="${it.icon_gap == null ? 1 : it.icon_gap}">
-          <span class="num" id="ed-icon-gap-v">${it.icon_gap == null ? "normale" : it.icon_gap}</span></div>
-        <div class="row"><label>Grandezza</label>
-          <input type="range" id="ed-size" min="5" max="16" step="1"
-            value="${it.size || 16}">
-          <span class="num" id="ed-size-v">${it.size ? it.size : "piena"}</span></div>
-        <div class="row"><label>Posizione</label>
-          <input type="range" id="ed-voff" min="0" max="11" step="1"
-            value="${it.voff != null ? it.voff : (it.valign === "bottom" ? Math.max(0, 16 - (it.size || 16)) : it.valign === "top" ? 0 : Math.round(Math.max(0, 16 - (it.size || 16)) / 2))}">
-          <span class="num" id="ed-voff-v">${it.voff != null ? it.voff + " px" : "auto"}</span></div>
-        <p style="color:var(--muted);font-size:12px;margin:0 0 6px">
-          Posizione verticale (px dall'alto, 0 = in cima). Vale quando la
-          casella è rimpicciolita (a piena non c'è spazio per spostarla).</p>
-        <div class="row"><label>Distanza dopo</label>
-          <input type="range" id="ed-gap" min="0" max="8" step="1"
-            value="${it.gap == null ? 2 : it.gap}">
-          <span class="num" id="ed-gap-v">${it.gap == null ? "normale" : it.gap}</span></div>
-        <div class="row" style="color:var(--muted);font-size:12px">${it.entity_id}</div>
-        <div class="row">
+      const hasBelow = !!(it.below && it.below.entity_id);
+      const bdec = it.below && it.below.decimals != null ? it.below.decimals : 1;
+      slot.innerHTML = `<div class="editor">${close}${preview}
+        <div class="edsec open" data-sec="s1">
+          <button type="button" class="edsec-h">🌡️ 1° sensore</button>
+          <div class="edsec-b">
+            <div class="row"><label>Sensore</label>
+              ${this._comboHTML("ed-entity-main", "il sensore principale", false)}</div>
+            <div class="row"><label>Etichetta</label>
+              <input type="text" id="ed-label" value="${(it.label || "").replace(/"/g, "&quot;")}"></div>
+            <div class="row"><label>Colore</label>
+              <input type="color" id="ed-color"
+                value="${it.color ? "#" + String(it.color).replace("#", "") : "#ffffff"}">
+              <button class="chip" id="ed-color-auto">Generale</button></div>
+            <div class="row"><label>Decimali</label><div class="chips">
+              <button class="chip dec-chip" data-v="0">0</button>
+              <button class="chip dec-chip" data-v="1">1</button>
+              <button class="chip dec-chip" data-v="2">2</button></div></div>
+            <div class="row"><label>Unità di misura</label><div class="chips">
+              <button class="chip unit-chip" data-v="no">Nascondi</button>
+              <button class="chip unit-chip" data-v="si">Mostra (C, W, %…)</button></div></div>
+            <div class="row"><label>Icona</label>
+              <input type="text" id="ed-icon" style="max-width:80px"
+                value="${(it.icon == null ? "" : it.icon).replace(/"/g, "&quot;")}"
+                placeholder="${this._autoIcon(this._hass && this._hass.states[it.entity_id], it.entity_id) || "auto"}">
+              <button class="chip" id="ed-icon-auto">Auto</button>
+              <button class="chip" id="ed-icon-none">Niente</button></div>
+            <div class="row"><label>Distanza icona</label>
+              <input type="range" id="ed-icon-gap" min="0" max="5" step="1"
+                value="${it.icon_gap == null ? 1 : it.icon_gap}">
+              <span class="num" id="ed-icon-gap-v">${it.icon_gap == null ? "normale" : it.icon_gap}</span></div>
+          </div>
+        </div>
+        <div class="edsec ${hasBelow ? "open" : ""}" data-sec="s2">
+          <button type="button" class="edsec-h">💧 2° sensore (sotto)${hasBelow ? " •" : ""}</button>
+          <div class="edsec-b">
+            <div class="row"><label>Sensore</label>
+              ${this._comboHTML("ed-below", "aggiungi un 2° sensore", false)}
+              <button class="chip" id="ed-below-clear">Togli</button></div>
+            <p style="color:var(--muted);font-size:12px;margin:2px 0 8px">
+              Impilato <b>sotto</b> il primo, nello stesso spazio che scorre.
+              Con un 2° sensore grandezza/posizione non si applicano.</p>
+            <div class="row"><label>Colore</label>
+              <input type="color" id="ed-below-color"
+                value="${it.below && it.below.color ? "#" + String(it.below.color).replace("#", "") : "#00c8ff"}"></div>
+            <div class="row"><label>Decimali</label><div class="chips">
+              <button class="chip dec2-chip" data-v="0">0</button>
+              <button class="chip dec2-chip" data-v="1">1</button>
+              <button class="chip dec2-chip" data-v="2">2</button></div></div>
+            <div class="row"><label>Unità di misura</label><div class="chips">
+              <button class="chip unit2-chip" data-v="no">Nascondi</button>
+              <button class="chip unit2-chip" data-v="si">Mostra</button></div></div>
+            <div class="row"><label>Icona</label>
+              <input type="text" id="ed-below-icon" style="max-width:80px"
+                value="${it.below && it.below.icon != null ? String(it.below.icon).replace(/"/g, "&quot;") : ""}"
+                placeholder="auto">
+              <button class="chip" id="ed-below-icon-auto">Auto</button>
+              <button class="chip" id="ed-below-icon-none">Niente</button></div>
+          </div>
+        </div>
+        <div class="edsec" data-sec="s3">
+          <button type="button" class="edsec-h">⚙️ Aspetto casella</button>
+          <div class="edsec-b">
+            <div class="row"><label>Grandezza</label>
+              <input type="range" id="ed-size" min="5" max="16" step="1"
+                value="${it.size || 16}">
+              <span class="num" id="ed-size-v">${it.size ? it.size : "piena"}</span></div>
+            <div class="row"><label>Posizione</label>
+              <input type="range" id="ed-voff" min="0" max="11" step="1"
+                value="${it.voff != null ? it.voff : (it.valign === "bottom" ? Math.max(0, 16 - (it.size || 16)) : it.valign === "top" ? 0 : Math.round(Math.max(0, 16 - (it.size || 16)) / 2))}">
+              <span class="num" id="ed-voff-v">${it.voff != null ? it.voff + " px" : "auto"}</span></div>
+            <div class="row"><label>Distanza dopo</label>
+              <input type="range" id="ed-gap" min="0" max="8" step="1"
+                value="${it.gap == null ? 2 : it.gap}">
+              <span class="num" id="ed-gap-v">${it.gap == null ? "normale" : it.gap}</span></div>
+            <div class="row" style="color:var(--muted);font-size:11px">${it.entity_id}</div>
+          </div>
+        </div>
+        <div class="row ed-actions">
           <button class="btn sec" id="ed-del" style="color:#ff4d6d;border-color:#ff4d6d">Elimina</button>
-          ${close}</div>
+          <div class="ed-act-right">
+            <button class="btn sec" id="ed-cancel">Annulla</button>
+            <button class="btn" id="ed-save">✓ Salva</button></div></div>
       </div>`;
+      // fisarmonica: apre/chiude ogni sezione
+      slot.querySelectorAll(".edsec-h").forEach((h) =>
+        h.addEventListener("click", () => h.parentElement.classList.toggle("open")));
+      // 1° sensore: scelta/cambio dell'entità principale
+      const mainCombo = slot.querySelector('[data-combo="ed-entity-main"]');
+      if (mainCombo) this._bindEntityPicker(mainCombo, {
+        initialId: it.entity_id,
+        onPick: (eid) => {
+          if (!eid || !this._hass.states[eid]) return;
+          it.entity_id = eid;
+          this._renderEditor(); this._renderTiles(); this._updateSimFromState(); this._autoSend();
+        },
+      });
+      // 2° sensore: decimali, unità, icona propri
+      const setBelowDeep = (fn) => { if (it.below) { fn(); this._renderTiles(); this._updateSimFromState(); this._autoSend(); } };
+      slot.querySelectorAll(".dec2-chip").forEach((c) => {
+        c.classList.toggle("active", String(bdec) === c.dataset.v);
+        c.addEventListener("click", () => setBelowDeep(() => {
+          it.below.decimals = parseInt(c.dataset.v, 10);
+          slot.querySelectorAll(".dec2-chip").forEach((x) => x.classList.toggle("active", x === c));
+        }));
+      });
+      slot.querySelectorAll(".unit2-chip").forEach((c) => {
+        c.classList.toggle("active", ((it.below && it.below.show_unit) ? "si" : "no") === c.dataset.v);
+        c.addEventListener("click", () => setBelowDeep(() => {
+          it.below.show_unit = c.dataset.v === "si";
+          slot.querySelectorAll(".unit2-chip").forEach((x) => x.classList.toggle("active", x === c));
+        }));
+      });
+      const bIcon = slot.querySelector("#ed-below-icon");
+      if (bIcon) {
+        bIcon.addEventListener("input", (e) => setBelowDeep(() => {
+          const v = e.target.value.trim();
+          if (v) it.below.icon = v; else delete it.below.icon;
+        }));
+        slot.querySelector("#ed-below-icon-auto").addEventListener("click", () => setBelowDeep(() => {
+          delete it.below.icon; bIcon.value = "";
+        }));
+        slot.querySelector("#ed-below-icon-none").addEventListener("click", () => setBelowDeep(() => {
+          it.below.icon = ""; bIcon.value = "";
+        }));
+      }
       slot.querySelector("#ed-label").addEventListener("input", (e) => {
         it.label = e.target.value; this._renderTiles(); this._updateSimFromState(); this._autoSend();
       });
@@ -1874,11 +2181,10 @@ class IPixelPanel extends HTMLElement {
           this._renderTiles(); this._updateSimFromState(); this._autoSend();
         });
       }
-      const belowEl = slot.querySelector("#ed-below");
+      const belowCombo = slot.querySelector('[data-combo="ed-below"]');
       const belowCol = slot.querySelector("#ed-below-color");
-      if (belowEl) {
-        const setBelow = () => {
-          const eid = belowEl.value.trim();
+      if (belowCombo) {
+        const applyBelow = (eid) => {
           if (eid && this._hass && this._hass.states[eid]) {
             it.below = {
               entity_id: eid, label: this._guessLabel(eid),
@@ -1887,12 +2193,12 @@ class IPixelPanel extends HTMLElement {
             };
           } else if (!eid) {
             delete it.below;
-          } else {
-            return this._toast("Scegli un sensore dalla lista", true);
           }
           this._renderTiles(); this._updateSimFromState(); this._autoSend();
         };
-        belowEl.addEventListener("change", setBelow);
+        const bp = this._bindEntityPicker(belowCombo, {
+          initialId: it.below && it.below.entity_id, onPick: applyBelow,
+        });
         if (belowCol) belowCol.addEventListener("change", () => {
           if (it.below) {
             it.below.color = belowCol.value.slice(1);
@@ -1901,7 +2207,7 @@ class IPixelPanel extends HTMLElement {
         });
         const clr = slot.querySelector("#ed-below-clear");
         if (clr) clr.addEventListener("click", () => {
-          delete it.below; belowEl.value = "";
+          delete it.below; bp.setSel(""); belowCombo.dataset.id = "";
           this._renderTiles(); this._updateSimFromState(); this._autoSend();
         });
       }
@@ -1975,10 +2281,23 @@ class IPixelPanel extends HTMLElement {
     }
     slot.querySelector("#ed-del").addEventListener("click", () => {
       this._items.splice(this._editIndex, 1);
-      this._editIndex = null; this._renderEditor(); this._renderTiles(); this._updateSimFromState(); this._autoSend();
+      this._editIndex = null; this._editBackupIdx = null; this._renderEditor();
+      this._renderTiles(); this._updateSimFromState(); this._autoSend();
     });
-    slot.querySelector("#ed-close").addEventListener("click", () => {
-      this._editIndex = null; this._renderEditor();
+    // chiusura tenendo le modifiche (X in alto, Salva)
+    const doClose = () => { this._editIndex = null; this._editBackupIdx = null; this._renderEditor(); };
+    const xBtn = slot.querySelector("#ed-close");
+    if (xBtn) xBtn.addEventListener("click", doClose);
+    const saveBtn = slot.querySelector("#ed-save");
+    if (saveBtn) saveBtn.addEventListener("click", doClose);
+    // Annulla: ripristina la copia di sicurezza e rimanda al display
+    const cancelBtn = slot.querySelector("#ed-cancel");
+    if (cancelBtn) cancelBtn.addEventListener("click", () => {
+      if (this._editBackup && this._editIndex != null) {
+        this._items[this._editIndex] = JSON.parse(JSON.stringify(this._editBackup));
+      }
+      this._editIndex = null; this._editBackupIdx = null; this._renderEditor();
+      this._renderTiles(); this._updateSimFromState(); this._autoSend();
     });
   }
 
@@ -2492,6 +2811,9 @@ class IPixelPanel extends HTMLElement {
       $("clock-on").addEventListener("click", () =>
         this._call("select", "select_option", {
           entity_id: this._eid("select", "mode"), option: "clock" }));
+      if ($("clock-off")) $("clock-off").addEventListener("click", () =>
+        this._call("select", "select_option", {
+          entity_id: this._eid("select", "mode"), option: "text" }));
       $("sync-time").addEventListener("click", () =>
         this._call("button", "press", { entity_id: this._eid("button", "sync_time") }));
       const wsClock = async (action, quiet) => {
@@ -3030,10 +3352,15 @@ class IPixelPanel extends HTMLElement {
       this.shadowRoot.querySelectorAll("#tiles .tile[data-i]").forEach((t) => {
         const it = this._items && this._items[t.dataset.i];
         if (!it) return;
-        const v = t.querySelector(".v");
-        if (v) {
+        const v1 = t.querySelector(".v1");
+        if (v1) {
           const nv = this._tileValue(it);
-          if (v.textContent !== nv) v.textContent = nv;
+          if (v1.textContent !== nv) v1.textContent = nv;
+        }
+        const v2 = t.querySelector(".v2");
+        if (v2) {
+          const nv2 = this._belowValue(it);
+          if (v2.textContent !== nv2) v2.textContent = nv2;
         }
       });
       this._updateSimFromState();

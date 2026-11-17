@@ -159,7 +159,7 @@ def _render_line_rgb(canvas, text, color_hex, font_name, lh, y0):
     """Disegna una riga (icone emoji a colori + testo colorato) sul canvas
     RGB a quota y0. Ritorna la larghezza occupata."""
     from pypixelcolor.lib.emoji_manager import is_emoji, get_emoji_image
-    from ..display.text_renderer import render_text_sprite
+    from ..display.text_renderer import bitmap_text_sprite
 
     sp = max(2, round(lh * 0.5))
     x = 0
@@ -188,7 +188,7 @@ def _render_line_rgb(canvas, text, color_hex, font_name, lh, y0):
         core = val.strip(" ")
         x += lead * sp
         if core:
-            spr = render_text_sprite(core, lh, color_hex, font_name)  # RGBA
+            spr = bitmap_text_sprite(core, lh, color_hex)  # RGBA, font bitmap 5x7
             canvas.paste(spr, (x, y0), spr)
             x += spr.width
         x += trail * sp
@@ -247,7 +247,7 @@ def _encode_small_segment(text, color_hex, size_px, valign, font_name,
     from pypixelcolor.commands.send_text.encoding import (
         encode_character_block, encode_emoji_block,
         _logic_reverse_bits_order_bytes)
-    from ..display.text_renderer import render_text_sprite
+    from ..display.text_renderer import bitmap_text_mask
 
     color_bytes = bytes.fromhex(color_hex)
     out = bytearray()
@@ -314,8 +314,7 @@ def _encode_small_segment(text, color_hex, size_px, valign, font_name,
         if lead:
             _append(Image.new("L", (lead * space_px, block_height), 0))
         if core:
-            spr = render_text_sprite(core, size_px, color_hex, font_name)
-            mask = spr.split()[3]
+            mask, _mw = bitmap_text_mask(core, size_px)  # font bitmap 5x7 nitido
             canvas = Image.new("L", (mask.width, block_height), 0)
             canvas.paste(255, (0, y0), mask)
             _append(canvas)
