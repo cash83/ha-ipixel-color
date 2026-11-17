@@ -1484,6 +1484,46 @@ async def _ws_slot(hass, connection, msg) -> None:
 
 @websocket_api.websocket_command(
     {
+        vol.Required("type"): f"{DOMAIN}/preview_segment",
+        vol.Optional("address"): str,
+        vol.Required("item"): dict,
+        vol.Optional("font"): vol.Any(str, None),
+    }
+)
+@websocket_api.async_response
+async def _ws_preview_segment(hass, connection, msg) -> None:
+    """Rende UNA sola casella come immagine statica: l'anteprima dentro
+    l'editor mostra solo la casella che si sta modificando, ferma, così si
+    capisce (invece dell'intera composizione che scorre)."""
+    import base64
+    import io as _io
+
+    from .composition import build_segments
+    from .device.text import render_segments_image
+    from .api import _resolve_font
+
+    item = msg["item"]
+    font = _resolve_font(msg.get("font"))
+
+    def _render():
+        segs = build_segments(hass, [item])
+        if not segs:
+            return None, 0, 0
+        img = render_segments_image(segs, font=font, block_height=16)
+        buf = _io.BytesIO()
+        img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii"), img.width, img.height
+
+    try:
+        b64, w, h = await hass.async_add_executor_job(_render)
+    except Exception as err:  # noqa: BLE001
+        connection.send_error(msg["id"], "render_failed", str(err))
+        return
+    connection.send_result(msg["id"], {"b64": b64, "width": w, "height": h})
+
+
+@websocket_api.websocket_command(
+    {
         vol.Required("type"): f"{DOMAIN}/frame",
         vol.Optional("address"): str,
     }
@@ -1955,6 +1995,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         websocket_api.async_register_command(hass, _ws_pixel)
         websocket_api.async_register_command(hass, _ws_slot)
         websocket_api.async_register_command(hass, _ws_frame)
+        websocket_api.async_register_command(hass, _ws_preview_segment)
         websocket_api.async_register_command(hass, _ws_release)
         hass.data[f"{DOMAIN}_ws_registered"] = True
 

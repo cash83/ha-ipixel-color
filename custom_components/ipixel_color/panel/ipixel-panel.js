@@ -521,6 +521,64 @@ class IPixelPanel extends HTMLElement {
     });
   }
 
+  /* Anteprima DENTRO l'editor: SOLO la casella in modifica, resa dal server
+     come immagine statica (non scorre, così si capisce). Debounce. */
+  _editorPreview(item) {
+    const cv = this.shadowRoot && this.shadowRoot.getElementById("sim-ed");
+    if (!cv || !this._hass || !this._dev || !item) return;
+    clearTimeout(this._edPrevT);
+    const snap = JSON.parse(JSON.stringify(item));
+    this._edPrevT = setTimeout(async () => {
+      try {
+        const res = await this._hass.callWS({
+          type: "ipixel_color/preview_segment",
+          address: this._dev.address, item: snap,
+        });
+        if (!res || !res.b64) { this._edStrip = null; this._drawEdStatic(); return; }
+        const im = new Image();
+        im.onload = () => {
+          const oc = document.createElement("canvas");
+          oc.width = im.width; oc.height = im.height;
+          oc.getContext("2d").drawImage(im, 0, 0);
+          this._edStrip = oc.getContext("2d").getImageData(0, 0, im.width, im.height);
+          this._drawEdStatic();
+        };
+        im.src = `data:image/${res.ext || "png"};base64,${res.b64}`;
+      } catch (e) { /* server vecchio: nessuna anteprima singola */ }
+    }, 160);
+  }
+
+  _drawEdStatic() {
+    const cv = this.shadowRoot && this.shadowRoot.getElementById("sim-ed");
+    const strip = this._edStrip;
+    if (!cv) return;
+    const H = 16, cell = 6;
+    if (!strip || !strip.width) {
+      cv.width = 64 * cell; cv.height = H * cell;
+      const c = cv.getContext("2d");
+      c.fillStyle = "#05060a"; c.fillRect(0, 0, cv.width, cv.height);
+      return;
+    }
+    const sw = strip.width;
+    if (cv.width !== sw * cell || cv.height !== H * cell) { cv.width = sw * cell; cv.height = H * cell; }
+    const ctx = cv.getContext("2d");
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, cv.width, cv.height);
+    for (let x = 0; x < sw; x++) {
+      for (let y = 0; y < H; y++) {
+        const i = (y * sw + x) * 4;
+        const r = strip.data[i], g = strip.data[i + 1], b = strip.data[i + 2];
+        if (r + g + b > 30) {
+          ctx.fillStyle = `rgb(${r},${g},${b})`;
+          ctx.shadowColor = ctx.fillStyle; ctx.shadowBlur = 4;
+        } else { ctx.fillStyle = "#0a1420"; ctx.shadowBlur = 0; }
+        ctx.beginPath();
+        ctx.arc(x * cell + cell / 2, y * cell + cell / 2, cell * 0.32, 0, 7);
+        ctx.fill();
+      }
+    }
+    ctx.shadowBlur = 0;
+  }
+
   _startSim() {
     if (this._simRunning) return;
     this._simRunning = true;
@@ -528,9 +586,8 @@ class IPixelPanel extends HTMLElement {
       if (!this._simRunning) return;
       const cv = this.shadowRoot && this.shadowRoot.getElementById("sim");
       if (cv) this._drawSim(cv, ts);
-      // mini anteprima nell'editor: stesso ts → lo scroll non avanza due volte
-      const cvEd = this.shadowRoot && this.shadowRoot.getElementById("sim-ed");
-      if (cvEd) this._drawSim(cvEd, ts);
+      // l'anteprima dell'editor (#sim-ed) è renderizzata a parte: SOLO la
+      // casella in modifica, FERMA (vedi _editorPreview)
       requestAnimationFrame(step);
     };
     requestAnimationFrame(step);
@@ -1769,21 +1826,29 @@ class IPixelPanel extends HTMLElement {
     const box = this.shadowRoot.getElementById("tiles");
     if (!box) return;
     const items = this._items || [];
-    const tiles = items.map((it, i) => `
-      <div class="tile ${it.enabled === false ? "" : "sel"}" data-i="${i}">
-        <span class="drag" title="Trascina per riordinare">⠿</span>
+    const tiles = items.map((it, i) => {
+      const brd = it.tile_border ? String(it.tile_border).replace("#", "") : "";
+      const nmc = it.tile_name ? String(it.tile_name).replace("#", "") : "";
+      const tileStyle = brd
+        ? `border-color:#${brd};${it.enabled !== false ? `box-shadow:0 0 16px #${brd}66,0 0 10px #${brd}22 inset` : "box-shadow:none"}`
+        : "";
+      return `
+      <div class="tile ${it.enabled === false ? "" : "sel"}" data-i="${i}" style="${tileStyle}">
         <button class="edit" data-i="${i}" title="Modifica">✎</button>
-        ${it.below && it.below.entity_id ? "" : `<div class="ic">${this._tileIcon(it)}</div>`}
-        <b>${it.type === "text" ? "Testo" : (it.label || "—")}</b>
-        ${
-          it.below && it.below.entity_id
-            ? `<div class="v stacked">
-                 <span class="vrow"><span class="vic">${this._tileIcon(it)}</span><span class="v1">${this._tileValue(it)}</span></span>
-                 <span class="vrow" style="color:#${String(it.below.color || "00c8ff").replace("#", "")}"><span class="vic">${this._belowIcon(it)}</span><span class="v2">${this._belowValue(it)}</span></span>
-               </div>`
-            : `<div class="v"><span class="v1">${this._tileValue(it)}</span></div>`
-        }
-      </div>`).join("");
+        <b style="${nmc ? `color:#${nmc}` : ""}">${it.type === "text" ? "Testo" : (it.label || "—")}</b>
+        ${(() => {
+          const c1 = it.color ? `color:#${String(it.color).replace("#", "")}` : "";
+          if (it.below && it.below.entity_id) {
+            const c2 = `color:#${String(it.below.color || "00c8ff").replace("#", "")}`;
+            return `<div class="v stacked">
+                 <span class="vrow" style="${c1}"><span class="vic">${this._tileIcon(it)}</span><span class="v1">${this._tileValue(it)}</span></span>
+                 <span class="vrow" style="${c2}"><span class="vic">${this._belowIcon(it)}</span><span class="v2">${this._belowValue(it)}</span></span>
+               </div>`;
+          }
+          return `<div class="v"><span class="v1" style="${c1}">${this._tileValue(it)}</span></div>`;
+        })()}
+      </div>`;
+    }).join("");
     box.innerHTML = tiles + `
       <div class="tile addtile" id="add-ent"><span class="plus">+</span>Sensore</div>
       <div class="tile addtile" id="add-txt"><span class="plus">+</span>Testo fisso</div>
@@ -1841,30 +1906,33 @@ class IPixelPanel extends HTMLElement {
   }
 
   _bindTileDrag(box) {
-    // Riordino col trascinamento: corpo della piastrella col mouse,
-    // maniglia ⠿ anche col dito (il resto della piastrella lascia
-    // scorrere la pagina sul telefono). Al rilascio salva e applica.
+    // Riordino col trascinamento, SENZA maniglia: col mouse si afferra la
+    // piastrella; col dito si tiene premuto (pressione prolungata) così il
+    // tocco breve accende/spegne e lo scorrimento muove la pagina.
     const tiles = () => [...box.querySelectorAll(".tile[data-i]")];
     let drag = null;
 
+    const lift = () => {
+      drag.active = true;
+      const r = drag.tile.getBoundingClientRect();
+      drag.offX = drag.startX - r.left;
+      drag.offY = drag.startY - r.top;
+      const g = drag.tile.cloneNode(true);
+      g.classList.add("ghost");
+      g.style.width = r.width + "px";
+      g.style.height = r.height + "px";
+      this.shadowRoot.appendChild(g);
+      drag.ghost = g;
+      drag.tile.classList.add("dragging");
+      drag.tile.style.touchAction = "none";  // adesso il gesto è nostro
+    };
+
     const onMove = (ev) => {
       if (!drag) return;
-      const dx = ev.clientX - drag.startX, dy = ev.clientY - drag.startY;
       if (!drag.active) {
-        if (Math.hypot(dx, dy) < 7) return;
-        drag.active = true;
-        // La piastrella "si solleva": una copia segue il puntatore,
-        // l'originale resta come segnaposto tratteggiato
-        const r = drag.tile.getBoundingClientRect();
-        drag.offX = drag.startX - r.left;
-        drag.offY = drag.startY - r.top;
-        const g = drag.tile.cloneNode(true);
-        g.classList.add("ghost");
-        g.style.width = r.width + "px";
-        g.style.height = r.height + "px";
-        this.shadowRoot.appendChild(g);
-        drag.ghost = g;
-        drag.tile.classList.add("dragging");
+        const dx = ev.clientX - drag.startX, dy = ev.clientY - drag.startY;
+        if (Math.hypot(dx, dy) < 7) return;  // soglia col mouse
+        lift();
       }
       ev.preventDefault();
       drag.ghost.style.left = (ev.clientX - drag.offX) + "px";
@@ -1881,6 +1949,7 @@ class IPixelPanel extends HTMLElement {
       if (!drag) return;
       const wasActive = drag.active;
       drag.tile.classList.remove("dragging");
+      drag.tile.style.touchAction = "";
       if (drag.ghost) drag.ghost.remove();
       drag = null;
       if (!wasActive) return;
@@ -1895,24 +1964,41 @@ class IPixelPanel extends HTMLElement {
     };
 
     tiles().forEach((t) => {
-      const begin = (ev) => {
-        drag = { tile: t, startX: ev.clientX, startY: ev.clientY, active: false };
-        try { t.setPointerCapture(ev.pointerId); } catch (e) { /* ok */ }
-      };
-      const handle = t.querySelector(".drag");
-      if (handle)
-        handle.addEventListener("pointerdown", (ev) => {
-          ev.stopPropagation(); begin(ev);
-        });
+      let pressTimer = null, downX = 0, downY = 0, pid = null;
+      const clearPress = () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } };
+
       t.addEventListener("pointerdown", (ev) => {
         if (ev.target.classList.contains("edit")) return;
-        if (ev.pointerType === "mouse" && ev.button === 0) begin(ev);
+        if (ev.pointerType === "mouse") {
+          if (ev.button !== 0) return;
+          drag = { tile: t, startX: ev.clientX, startY: ev.clientY, active: false };
+          try { t.setPointerCapture(ev.pointerId); } catch (e) { /* ok */ }
+          return;
+        }
+        // dito/penna: parte solo con la pressione prolungata (tieni premuto)
+        downX = ev.clientX; downY = ev.clientY; pid = ev.pointerId;
+        clearPress();
+        pressTimer = setTimeout(() => {
+          pressTimer = null;
+          drag = { tile: t, startX: downX, startY: downY, active: false };
+          try { t.setPointerCapture(pid); } catch (e) { /* ok */ }
+          lift();  // la piastrella "si solleva" sotto il dito
+        }, 300);
       });
-      t.addEventListener("pointermove", onMove);
-      t.addEventListener("pointerup", finish);
+
+      t.addEventListener("pointermove", (ev) => {
+        if (pressTimer) {  // sto ancora decidendo: se mi muovo è uno scroll
+          if (Math.hypot(ev.clientX - downX, ev.clientY - downY) > 10) clearPress();
+          return;
+        }
+        onMove(ev);
+      });
+      t.addEventListener("pointerup", () => { clearPress(); finish(); });
       t.addEventListener("pointercancel", () => {
+        clearPress();
         if (drag) {
           drag.tile.classList.remove("dragging");
+          drag.tile.style.touchAction = "";
           if (drag.ghost) drag.ghost.remove();
           drag = null;
         }
@@ -1926,7 +2012,7 @@ class IPixelPanel extends HTMLElement {
     const close = `<button class="ed-x" id="ed-close" title="Chiudi" aria-label="Chiudi">✕</button>`;
     // mini anteprima dal vivo dentro l'editor (stesso frame del display)
     const preview = `<div class="ed-preview"><canvas id="sim-ed"></canvas>
-      <span>• anteprima dal vivo</span></div>`;
+      <span>• anteprima di questa casella</span></div>`;
     // click sullo sfondo scuro (fuori dal riquadro) = chiudi tenendo le modifiche
     slot.onclick = (e) => {
       if (e.target !== slot) return;
@@ -2106,6 +2192,17 @@ class IPixelPanel extends HTMLElement {
               <input type="range" id="ed-gap" min="0" max="8" step="1"
                 value="${it.gap == null ? 2 : it.gap}">
               <span class="num" id="ed-gap-v">${it.gap == null ? "normale" : it.gap}</span></div>
+            <div class="row"><label>Colore cornice</label>
+              <input type="color" id="ed-tile-border"
+                value="${it.tile_border ? "#" + String(it.tile_border).replace("#", "") : "#19e5ff"}">
+              <button class="chip" id="ed-tile-border-def">Default</button></div>
+            <div class="row"><label>Colore nome</label>
+              <input type="color" id="ed-tile-name"
+                value="${it.tile_name ? "#" + String(it.tile_name).replace("#", "") : "#cdeeff"}">
+              <button class="chip" id="ed-tile-name-def">Default</button></div>
+            <p style="color:var(--muted);font-size:12px;margin:2px 0 0">
+              Cornice e nome: solo l'aspetto della piastrella nel pannello,
+              non vanno al display.</p>
             <div class="row" style="color:var(--muted);font-size:11px">${it.entity_id}</div>
           </div>
         </div>
@@ -2156,6 +2253,25 @@ class IPixelPanel extends HTMLElement {
         slot.querySelector("#ed-below-icon-none").addEventListener("click", () => setBelowDeep(() => {
           it.below.icon = ""; bIcon.value = "";
         }));
+      }
+      // colore cornice/nome della piastrella (solo aspetto del pannello)
+      const tbord = slot.querySelector("#ed-tile-border");
+      if (tbord) {
+        tbord.addEventListener("change", () => {
+          it.tile_border = tbord.value.slice(1); this._renderTiles(); this._autoSend();
+        });
+        slot.querySelector("#ed-tile-border-def").addEventListener("click", () => {
+          delete it.tile_border; this._renderTiles(); this._autoSend();
+        });
+      }
+      const tname = slot.querySelector("#ed-tile-name");
+      if (tname) {
+        tname.addEventListener("change", () => {
+          it.tile_name = tname.value.slice(1); this._renderTiles(); this._autoSend();
+        });
+        slot.querySelector("#ed-tile-name-def").addEventListener("click", () => {
+          delete it.tile_name; this._renderTiles(); this._autoSend();
+        });
       }
       slot.querySelector("#ed-label").addEventListener("input", (e) => {
         it.label = e.target.value; this._renderTiles(); this._updateSimFromState(); this._autoSend();
@@ -2299,6 +2415,11 @@ class IPixelPanel extends HTMLElement {
       this._editIndex = null; this._editBackupIdx = null; this._renderEditor();
       this._renderTiles(); this._updateSimFromState(); this._autoSend();
     });
+    // anteprima iniziale: SOLO la casella in modifica, ferma
+    if (this._editIndex != null && this._items && this._items[this._editIndex]) {
+      this._edStrip = null; this._drawEdStatic();
+      this._editorPreview(this._items[this._editIndex]);
+    }
   }
 
   async _loadComposition() {
@@ -2345,6 +2466,10 @@ class IPixelPanel extends HTMLElement {
      display". Debounce ~400ms per non intasare il BLE; se c'è un invio in
      corso riprova a breve. Si può spegnere con this._autoApply = false. */
   _autoSend(delay = 400) {
+    // se un editor di casella è aperto, aggiorna la sua anteprima singola
+    if (this._editIndex != null && this._items && this._items[this._editIndex]) {
+      this._editorPreview(this._items[this._editIndex]);
+    }
     if (this._autoApply === false) return;
     if (!this._items) return;                 // niente da inviare finché non carica
     clearTimeout(this._autoT);
