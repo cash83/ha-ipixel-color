@@ -6,18 +6,22 @@ import os
 from pathlib import Path
 from typing import Any
 
+from homeassistant.components import bluetooth
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .api import iPIXELAPI
+from .bluetooth.client import scanner_label
 from .const import DOMAIN, CONF_ADDRESS, CONF_NAME, AVAILABLE_MODES, DEFAULT_MODE
 from .common import get_entity_id_by_unique_id
 from .common import update_ipixel_display
 from .fonts import get_available_fonts
+
+ADAPTER_AUTO = "Automatico"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -40,6 +44,7 @@ async def async_setup_entry(
         iPIXELFontSelect(hass, api, entry, address, name, fonts),
         iPIXELModeSelect(hass, api, entry, address, name),
         iPIXELClockStyleSelect(hass, api, entry, address, name),
+        iPIXELAdapterSelect(hass, entry, address, name),
     ])
 
 
@@ -287,3 +292,118 @@ class iPIXELClockStyleSelect(SelectEntity, RestoreEntity):
     def available(self) -> bool:
         """Return True if entity is available."""
         return True
+
+
+class iPIXELAdapterSelect(SelectEntity):
+    """Scelta dell'adattatore BLE con cui collegare il display.
+
+    "Automatico" = lo decide HA (segnale migliore). Scegliendo un
+    adattatore/proxy preciso (es. il Bluetooth del box) il collegamento
+    viene forzato su quello: utile perché via proxy ESPHome i pacchetti
+    grandi si perdono. Vedi il sensore "Segnale BLE" per capire quale ha
+    il segnale migliore.
+    """
+
+    _attr_icon = "mdi:bluetooth-connect"
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_should_poll = True  # ricalcola i dBm nella tendina ogni giro
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, address: str, name: str) -> None:
+        self.hass = hass
+        self._entry = entry
+        self._address = address
+        self._name = name
+        self._attr_name = "Adattatore BLE"
+        self._attr_unique_id = f"{address}_ble_adapter"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, address)},
+            name=name,
+            manufacturer="iPIXEL",
+            model="LED Matrix Display",
+        )
+        # Snapshot (aggiornato a ogni poll): tiene stabili le etichette
+        # mentre l'utente apre la tendina e sceglie, così HA non rifiuta
+        # l'opzione perché nel frattempo il dBm è cambiato.
+        self._cached_options: list[str] = [ADAPTER_AUTO]
+        self._cached_current: str = ADAPTER_AUTO
+
+    def _scanner_rssi(self) -> dict[str, int | None]:
+        """{nome adattatore: RSSI migliore} di chi vede ora il display."""
+        out: dict[str, int | None] = {}
+        try:
+            for d in bluetooth.async_scanner_devices_by_address(
+                self.hass, self._address, connectable=True
+            ):
+                lbl = scanner_label(d.scanner)
+                r = getattr(d.advertisement, "rssi", None)
+                if lbl not in out or (
+                    r is not None and (out[lbl] is None or r > out[lbl])
+                ):
+                    out[lbl] = r
+        except Exception:  # pragma: no cover - best effort
+            pass
+        return out
+
+    @staticmethod
+    def _label(name: str, rssi: int | None) -> str:
+        # etichetta MOSTRATA (col segnale); il valore SALVATO resta il nome
+        return f"{name} · {rssi} dBm" if rssi is not None else name
+
+    @staticmethod
+    def _stable_name(option: str) -> str:
+        # recupera il nome stabile dall'etichetta col segnale
+        if option != ADAPTER_AUTO and option.endswith(" dBm") and " · " in option:
+            return option.rsplit(" · ", 1)[0]
+        return option
+
+    def _recompute(self) -> None:
+        """Rigenera lo snapshot di opzioni/selezione (coi dBm freschi)."""
+        seen = self._scanner_rssi()
+        labels = [self._label(n, r) for n, r in seen.items()]
+        pref = self._entry.options.get("preferred_adapter")
+        if pref and pref not in seen:
+            labels.append(pref)  # scegliibile anche se ora non in vista
+        self._cached_options = [ADAPTER_AUTO] + labels
+        if not pref:
+            self._cached_current = ADAPTER_AUTO
+        elif pref in seen:
+            self._cached_current = self._label(pref, seen[pref])
+        else:
+            self._cached_current = pref
+
+    @property
+    def options(self) -> list[str]:
+        return self._cached_options
+
+    @property
+    def current_option(self) -> str:
+        return self._cached_current
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self._recompute()  # pronto subito, senza aspettare il primo poll
+
+    async def async_update(self) -> None:
+        self._recompute()
+
+    async def async_select_option(self, option: str) -> None:
+        name = self._stable_name(option)
+        options = dict(self._entry.options)
+        if name == ADAPTER_AUTO:
+            options.pop("preferred_adapter", None)
+            chosen = None
+        else:
+            options["preferred_adapter"] = name
+            chosen = name
+        self.hass.config_entries.async_update_entry(self._entry, options=options)
+        # subito disponibile al client, poi reload per riconnettere via quello
+        self.hass.data.setdefault(DOMAIN, {}).setdefault("pref_adapter", {})[
+            self._address
+        ] = chosen
+        self.async_write_ha_state()
+        _LOGGER.info("Adattatore BLE scelto: %s", name)
+        await self.hass.config_entries.async_reload(self._entry.entry_id)

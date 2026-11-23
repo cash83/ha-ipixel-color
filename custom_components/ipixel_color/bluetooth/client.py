@@ -27,10 +27,19 @@ if TYPE_CHECKING:
 
 from homeassistant.components import bluetooth
 
-from ..const import WRITE_UUID, NOTIFY_UUID
+from ..const import WRITE_UUID, NOTIFY_UUID, DOMAIN
 from ..exceptions import iPIXELConnectionError
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def scanner_label(scanner: Any) -> str:
+    """Nome leggibile di un adattatore/proxy BLE (per il select e il sensore)."""
+    return (
+        getattr(scanner, "name", None)
+        or getattr(scanner, "source", None)
+        or "?"
+    )
 
 # Fallback chunk payload when the MTU is unknown (BLE minimum is 23).
 _MIN_CHUNK = 20
@@ -117,9 +126,39 @@ class BluetoothClient:
         self._notification_handler = notification_handler
 
         try:
-            ble_device = bluetooth.async_ble_device_from_address(
-                self._hass, self._address, connectable=True
+            ble_device = None
+            # Adattatore scelto dall'utente (select "Adattatore BLE"):
+            # se impostato, forza il collegamento via QUELLO (es. il
+            # Bluetooth del box invece di un proxy ESPHome che perde i
+            # pacchetti grandi). Se non è più in vista, ripiega su auto.
+            pref = (
+                self._hass.data.get(DOMAIN, {})
+                .get("pref_adapter", {})
+                .get(self._address)
             )
+            if pref:
+                try:
+                    for d in bluetooth.async_scanner_devices_by_address(
+                        self._hass, self._address, connectable=True
+                    ):
+                        if scanner_label(d.scanner) == pref:
+                            ble_device = d.ble_device
+                            _LOGGER.info(
+                                "Collegamento forzato via adattatore '%s'", pref
+                            )
+                            break
+                    else:
+                        _LOGGER.warning(
+                            "Adattatore scelto '%s' non in vista: uso automatico",
+                            pref,
+                        )
+                except Exception as err:  # pragma: no cover - best effort
+                    _LOGGER.debug("Scelta adattatore fallita (%s): auto", err)
+
+            if ble_device is None:
+                ble_device = bluetooth.async_ble_device_from_address(
+                    self._hass, self._address, connectable=True
+                )
 
             if not ble_device:
                 raise iPIXELConnectionError(
@@ -247,14 +286,32 @@ class BluetoothClient:
             return (False, None) if return_response else False
         async with self._lock:
             total = len(command)
-            # Primo tentativo veloce (conferma ogni 4 pacchetti); se il
-            # collegamento vacilla, riconnessione e ritrasmissione in
-            # modalità lenta con ogni pacchetto confermato.
-            for confirm_every in (4, 1):
+            # Frame GRANDE (composizione sensori ~12 KB): parte già in
+            # modalità gentile — conferma OGNI pacchetto (l'ATT fa da
+            # freno) + pausa tra i pacchetti, perché se gli si sparano i
+            # ~50 pezzi a raffica il buffer del firmware del display va in
+            # overflow e si pianta. UN SOLO tentativo per i frame grandi:
+            # niente seconda raffica da 12 KB (il colpo di grazia a un
+            # display già in affanno) — si rimanda al giro dopo. I frame
+            # piccoli (orologio) restano veloci: conferma ogni 4, con
+            # ripiego lento se il collegamento vacilla.
+            big = total > 1500
+            attempts = (1,) if big else (4, 1)
+            pace = 0.012 if big else 0.0
+            for attempt, confirm_every in enumerate(attempts):
+                if attempt:
+                    # respiro prima di riprovare: non incalzare la radio
+                    await asyncio.sleep(0.5)
                 try:
-                    await self._ensure_connected()
-                except iPIXELConnectionError as err:
-                    _LOGGER.warning("Riconnessione fallita: %s", err)
+                    # Timeout sulla riconnessione: il backoff di
+                    # establish_connection, tenuto dentro il lock, può
+                    # bloccare ogni invio per minuti se il device è muto.
+                    await asyncio.wait_for(self._ensure_connected(), timeout=20.0)
+                except (iPIXELConnectionError, asyncio.TimeoutError) as err:
+                    _LOGGER.warning(
+                        "Riconnessione fallita: %s", err or "timeout"
+                    )
+                    self._connected = False
                     continue
                 if not self._client:
                     continue
@@ -274,12 +331,25 @@ class BluetoothClient:
                             i % confirm_every == confirm_every - 1
                             or i == len(chunks) - 1
                         )
-                        await self._client.write_gatt_char(
-                            WRITE_UUID, part, response=confirmed
+                        # Timeout sulla singola scrittura: se la radio/il
+                        # proxy si impicca, write_gatt_char NON ritorna e
+                        # terrebbe il lock all'infinito (display congelato,
+                        # switch ancora "on"). Col timeout diventa un
+                        # fallimento recuperabile.
+                        await asyncio.wait_for(
+                            self._client.write_gatt_char(
+                                WRITE_UUID, part, response=confirmed
+                            ),
+                            timeout=8.0,
                         )
-                except BleakError as err:
+                        # Pacing sui frame grandi: dà al display il tempo
+                        # di svuotare il buffer tra un pezzo e l'altro
+                        if pace and i != len(chunks) - 1:
+                            await asyncio.sleep(pace)
+                except (BleakError, asyncio.TimeoutError) as err:
                     _LOGGER.warning(
-                        "Invio interrotto (%s)%s", err,
+                        "Invio interrotto (%s)%s",
+                        err or "timeout scrittura",
                         ", ritrasmetto in modalità lenta" if confirm_every != 1 else "",
                     )
                     self._connected = False
@@ -309,7 +379,10 @@ class BluetoothClient:
                     return True, self._last_response
                 return True
 
-            _LOGGER.error("Invio fallito anche in modalità lenta (%d byte)", total)
+            _LOGGER.error(
+                "Invio fallito%s (%d byte)",
+                "" if big else " anche in modalità lenta", total,
+            )
             if return_response:
                 return False, None
             return False

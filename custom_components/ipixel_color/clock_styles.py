@@ -221,8 +221,13 @@ def render(
     icon=None,
     size: str = "m",
     gap: int = 2,
+    day_size=None,
 ) -> tuple[bytes, str]:
-    """Una schermata dello stile scelto: (bytes, estensione)."""
+    """Una schermata dello stile scelto: (bytes, estensione).
+
+    day_size (solo stile A): grandezza del giorno della settimana.
+    None/"auto" = automatico (raddoppia se c'e' spazio), 1 = normale,
+    2 = grande (ripiega su 1 se non ci sta)."""
     hh, mm = f"{now:%H}", f"{now:%M}"
     tempo = f"{hh}:{mm}"
     data = f"{now:%d/%m/%y}"  # con l'anno: "16/11/26"
@@ -392,10 +397,20 @@ def render(
     tw = _text_width(main, tf, tsx)
     ty = max(0, (H - time_h) // 2)
     dh3 = len(F3["0"])                      # altezza base del giorno (5)
-    dsx = 1
-    if tsy == 2 and (_text_width(day, F3, 2) + gap + tw + 2) <= W \
-            and (ty + time_h - dh3 * 2) >= 0:
-        dsx = 2                             # il giorno raddoppia con l'ora alta
+    # Grandezza del giorno: scelta dall'utente oppure automatica.
+    ds_opt = day_size
+    if isinstance(ds_opt, str):
+        ds_opt = ds_opt.strip().lower()
+        ds_opt = None if ds_opt in ("", "auto") else int(ds_opt) if ds_opt.isdigit() else None
+    fits2 = (_text_width(day, F3, 2) + gap + tw + 2) <= W \
+        and (ty + time_h - dh3 * 2) >= 0
+    if ds_opt == 2:
+        dsx = 2 if fits2 else 1             # grande, ma ripiega se non ci sta
+    elif ds_opt == 1:
+        dsx = 1                             # normale, forzato
+    else:
+        # automatico: raddoppia quando l'ora e' alta e resta spazio
+        dsx = 2 if (tsy == 2 and fits2) else 1
     dw = _text_width(day, F3, dsx)
     day_h = dh3 * dsx
     x0 = max(0, (W - (dw + gap + tw)) // 2)

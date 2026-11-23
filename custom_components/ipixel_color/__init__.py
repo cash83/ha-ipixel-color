@@ -353,12 +353,21 @@ async def _timer_loop(hass: HomeAssistant, entry_id: str, mode: str, seconds: in
         e2 = hass.config_entries.async_get_entry(entry_id)
         return str((e2.options.get("clock_it_style") if e2 else "a") or "a")
 
-    def _color_rgb() -> tuple[int, int, int]:
-        hexc = "ffffff"
+    def _clock_color_hex() -> str:
+        """Colore dell'orologio italiano: la scelta dedicata del pannello
+        se c'e', altrimenti la luce globale 'Colore testo'."""
+        e2 = hass.config_entries.async_get_entry(entry_id)
+        chosen = str((e2.options.get("clock_color") if e2 else "") or "")
+        if chosen:
+            return chosen.lstrip("#")
         if address:
-            hexc = get_color_from_light_entity(
+            return get_color_from_light_entity(
                 hass, address, "text_color", default="ffffff"
             ) or "ffffff"
+        return "ffffff"
+
+    def _color_rgb() -> tuple[int, int, int]:
+        hexc = _clock_color_hex()
         try:
             return tuple(int(hexc[i:i + 2], 16) for i in (0, 2, 4))
         except (ValueError, IndexError):
@@ -434,14 +443,20 @@ async def _timer_loop(hass: HomeAssistant, entry_id: str, mode: str, seconds: in
             gap = int((e2.options.get("clock_gap") if e2 else 2))
         except (TypeError, ValueError):
             gap = 2
+        day_size = (e2.options.get("clock_day_size") if e2 else None) or None
         data, ext = await hass.async_add_executor_job(
-            cs.render, style, now, _color_rgb(), temp, show_date, icon, size, gap
+            cs.render, style, now, _color_rgb(), temp, show_date, icon,
+            size, gap, day_size
         )
-        await api.display_image(data, ext, "crop")
+        # Restituisce l'esito: se False il link e' giu' e la fase
+        # orologio esce subito invece di restare a martellare frame
+        return bool(await api.display_image(data, ext, "crop"))
 
-    async def _clock_tick(deadline: float | None) -> None:
+    async def _clock_tick(deadline: float | None) -> bool:
         """Una schermata dell'orologio italiano, poi dorme fino alla
-        prossima (o fino alla scadenza della fase, se arriva prima)."""
+        prossima (o fino alla scadenza della fase, se arriva prima).
+        Ritorna False se il frame non e' partito (link giu'): chi chiama
+        puo' smettere subito invece di restare a martellare la radio."""
         from homeassistant.util import dt as dt_util
 
         def _nap(secs: float) -> float:
@@ -456,49 +471,57 @@ async def _timer_loop(hass: HomeAssistant, entry_id: str, mode: str, seconds: in
             # in font bitmap COMPATTO), non piu' il testo a tutta altezza
             # di pypixelcolor — cosi' i numeri sono piu' piccoli e il
             # giorno ("MA", "GI"...) si vede.
-            await _frame("a", now, False)
+            ok = await _frame("a", now, False)
+            if not ok:
+                return False
             if _show_date_on():
                 # ultimi ~10 secondi del minuto: data
                 await asyncio.sleep(_nap(max(1, 51 - now.second)))
                 if deadline is not None and _time.monotonic() >= deadline:
-                    return
+                    return True
                 await _frame("a", dt_util.now(), True)
                 await asyncio.sleep(_nap(max(1, 61 - dt_util.now().second)))
             else:
                 await asyncio.sleep(_nap(max(1, 61 - now.second)))
+            return True
         elif style == "i":
             # L'ora a parole scorre col motore del display
-            color = "ffffff"
-            if address:
-                color = get_color_from_light_entity(
-                    hass, address, "text_color", default="ffffff"
-                ) or "ffffff"
-            await api.display_text_pypixelcolor(
+            color = _clock_color_hex()
+            ok = await api.display_text_pypixelcolor(
                 text=cs.ora_a_parole(now, with_date=_show_date_on()),
                 color=color,
                 font=_current_font(), animation=1, speed=50,
                 rainbow_mode=0,
             )
+            if not ok:
+                return False
             await asyncio.sleep(_nap(max(5, 61 - dt_util.now().second)))
+            return True
         elif style in ("e", "g", "h"):
             # Stili vivi: una schermata al secondo; la data compare
             # negli ultimi ~9 secondi del minuto come negli altri
             date_now = now.second >= 51 and _show_date_on()
-            await _frame(style, now, date_now)
+            ok = await _frame(style, now, date_now)
+            if not ok:
+                return False
             frac = dt_util.now().microsecond / 1_000_000
             await asyncio.sleep(_nap(1 - frac))
+            return True
         else:  # b, c, d, f, l, m, n: una schermata al minuto
             # B e D hanno gia' la data in vista: niente alternanza
             date_on = _show_date_on() and style not in ("b", "d")
-            await _frame(style, now, False)
+            ok = await _frame(style, now, False)
+            if not ok:
+                return False
             if date_on:
                 await asyncio.sleep(_nap(max(1, 51 - now.second)))
                 if deadline is not None and _time.monotonic() >= deadline:
-                    return
+                    return True
                 await _frame(style, dt_util.now(), True)
                 await asyncio.sleep(_nap(max(1, 61 - dt_util.now().second)))
             else:
                 await asyncio.sleep(_nap(max(1, 61 - now.second)))
+            return True
 
     start = _time.monotonic()
     try:
@@ -605,10 +628,19 @@ async def _timer_loop(hass: HomeAssistant, entry_id: str, mode: str, seconds: in
                 # Orologio ITALIANO con lo stile scelto: non cambia la
                 # modalita' del display, cosi' dopo la fase i sensori
                 # tornano regolarmente (l'orologio di fabbrica invece
-                # metteva il display in modo clock e ci restava)
-                end_clock = _time.monotonic() + max(5, secs)
+                # metteva il display in modo clock e ci restava).
+                # Rispetta la durata scelta (minimo 1 s): il tempo vero
+                # non scende sotto quello che ci mette il BLE a mandare
+                # l'immagine dell'orologio, ma niente piu' attesa inutile.
+                end_clock = _time.monotonic() + max(1, secs)
                 while _time.monotonic() < end_clock - 0.05:
-                    await _clock_tick(end_clock)
+                    ok = await _clock_tick(end_clock)
+                    if not ok:
+                        # Link assente: non restare a martellare frame e
+                        # riconnessioni dentro la fase orologio. Esce e
+                        # lascia proseguire la rotazione (con il respiro
+                        # di 0.4s a fine fase), cosi' non sembra bloccata.
+                        break
 
             def _playlist() -> list:
                 e2 = hass.config_entries.async_get_entry(entry_id)
@@ -630,6 +662,11 @@ async def _timer_loop(hass: HomeAssistant, entry_id: str, mode: str, seconds: in
                             await _phase_image(step.get("file"), secs)
                         elif typ == "clock":
                             await _phase_clock(secs)
+                        # Un filo di respiro tra una fase e l'altra: con
+                        # durate corte (es. orologio 1s) evita di sparare
+                        # immagini BLE una attaccata all'altra e stressare
+                        # la radio (è lì che il firmware si impunta).
+                        await asyncio.sleep(0.4)
             else:
                 if not (use_sensors or anim_bytes or use_clock):
                     return  # niente da ruotare
@@ -643,7 +680,11 @@ async def _timer_loop(hass: HomeAssistant, entry_id: str, mode: str, seconds: in
                         await _phase_clock(clock_s)
         elif mode == "clock_it":
             while True:
-                await _clock_tick(None)
+                ok = await _clock_tick(None)
+                if not ok:
+                    # Link giu': aspetta un filo prima di riprovare, cosi'
+                    # non spinge frame e riconnessioni a raffica
+                    await asyncio.sleep(3)
         elif mode == "rhythm":
             # Equalizzatore di bordo: le barre le muoviamo noi con
             # un'onda morbida + un po' di caso (manca un microfono)
@@ -745,8 +786,9 @@ async def _ws_timer(hass, connection, msg) -> None:
         _set_override(hass, entry.entry_id)
         # eager_start=False: il task va registrato PRIMA che inizi a
         # girare, altrimenti non si riconosce e si auto-cancella
-        task = hass.async_create_task(
+        task = hass.async_create_background_task(
             _timer_loop(hass, entry.entry_id, msg["mode"], msg["seconds"]),
+            "ipixel rotazione",
             eager_start=False,
         )
         hass.data.setdefault(f"{DOMAIN}_timers", {})[entry.entry_id] = task
@@ -1380,8 +1422,9 @@ async def _ws_rhythm(hass, connection, msg) -> None:
     if msg["action"] == "start":
         _set_override(hass, entry.entry_id)
         hass.data.setdefault(f"{DOMAIN}_rhythm_style", {})[entry.entry_id] = msg["style"]
-        task = hass.async_create_task(
+        task = hass.async_create_background_task(
             _timer_loop(hass, entry.entry_id, "rhythm", 0),
+            "ipixel rotazione",
             eager_start=False,
         )
         hass.data.setdefault(f"{DOMAIN}_timers", {})[entry.entry_id] = task
@@ -1552,11 +1595,13 @@ async def _ws_frame(hass, connection, msg) -> None:
         ),
         vol.Optional("icon"): cv.string,
         vol.Optional("icon_color"): cv.string,
+        vol.Optional("color"): cv.string,
         vol.Optional("size"): vol.Any(
             vol.All(vol.Coerce(int), vol.Range(min=5, max=16)),
             vol.In(["s", "m", "g"]),
         ),
         vol.Optional("gap"): vol.All(int, vol.Range(min=0, max=12)),
+        vol.Optional("day_size"): vol.In(["auto", "1", "2"]),
     }
 )
 @websocket_api.async_response
@@ -1578,10 +1623,14 @@ async def _ws_set_clock_style(hass, connection, msg) -> None:
         options["clock_icon"] = msg["icon"].strip().removeprefix("mdi:")
     if "icon_color" in msg:
         options["clock_icon_color"] = msg["icon_color"].lstrip("#")
+    if "color" in msg:
+        options["clock_color"] = msg["color"].lstrip("#")
     if "size" in msg:
         options["clock_size"] = msg["size"]
     if "gap" in msg:
         options["clock_gap"] = int(msg["gap"])
+    if "day_size" in msg:
+        options["clock_day_size"] = "" if msg["day_size"] == "auto" else msg["day_size"]
     hass.config_entries.async_update_entry(entry, options=options)
     connection.send_result(msg["id"], {"saved": True})
 
@@ -1623,8 +1672,10 @@ async def _ws_status(hass, connection, msg) -> None:
             "clock_style": entry.options.get("clock_it_style", "a"),
             "clock_size": entry.options.get("clock_size", "m"),
             "clock_gap": entry.options.get("clock_gap", 2),
+            "clock_day_size": entry.options.get("clock_day_size", ""),
             "clock_icon": entry.options.get("clock_icon", "heart"),
             "clock_icon_color": entry.options.get("clock_icon_color", "ff0000"),
+            "clock_color": entry.options.get("clock_color", ""),
             "released_s": (
                 api.released_seconds_left
                 if (api := hass.data.get(DOMAIN, {}).get(entry.entry_id))
@@ -1902,6 +1953,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     _LOGGER.debug("Setting up iPIXEL Color for %s (%s)", name, address)
 
+    # Adattatore BLE preferito (select "Adattatore BLE"): va in hass.data
+    # PRIMA della connessione, così anche il primo collegamento lo usa.
+    hass.data.setdefault(DOMAIN, {}).setdefault("pref_adapter", {})[address] = (
+        entry.options.get("preferred_adapter")
+    )
+
     api = iPIXELAPI(hass, address)
 
     # Override dimensioni pannello salvato dall'utente (firmware bugiardi)
@@ -2041,8 +2098,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     # questi 8 secondi: vince lui, niente ripristino
                     return
                 _set_override(hass, entry.entry_id)
-                task = hass.async_create_task(
+                task = hass.async_create_background_task(
                     _timer_loop(hass, entry.entry_id, owner, 0),
+                    "ipixel rotazione",
                     eager_start=False,
                 )
                 hass.data.setdefault(f"{DOMAIN}_timers", {})[entry.entry_id] = task

@@ -119,10 +119,183 @@ class IPixelPanel extends HTMLElement {
     this._simScroll = true;
   }
 
-  connectedCallback() { this._startSim(); }
+  connectedCallback() {
+    this._startSim();
+    if (!this._cwBound) {
+      this._cwBound = true;
+      // Delegato: ogni swatch .cwell apre la ruota colori (stile HA).
+      // Vale anche per le caselle ridisegnate dopo (editor).
+      this.shadowRoot.addEventListener("click", (ev) => {
+        const w = ev.target.closest && ev.target.closest(".cwell");
+        if (w) { ev.preventDefault(); this._openColorWheel(w); }
+      });
+    }
+  }
   disconnectedCallback() {
     this._simRunning = false;
     if (this._frameTimer) { clearInterval(this._frameTimer); this._frameTimer = null; }
+  }
+
+  // ---- selettore colore a ruota (sostituisce <input type=color>) ----
+  // Campo colore: input nascosto (stesso id di prima, cosi' il resto del
+  // codice legge .value come sempre) + pastiglia cliccabile.
+  _colorField(id, hex) {
+    const h = "#" + String(hex == null ? "ffffff" : hex).replace("#", "");
+    return `<input type="hidden" id="${id}" value="${h}">` +
+      `<button type="button" class="cwell" data-for="${id}" style="--c:${h}"></button>`;
+  }
+  // Tiene in pari input nascosto + pastiglia e avvisa chi ascolta "change".
+  _setColorField(id, hex) {
+    const root = this.shadowRoot;
+    const inp = root.getElementById(id);
+    const h = "#" + String(hex == null ? "ffffff" : hex).replace("#", "");
+    if (inp) {
+      inp.value = h;
+      inp.dispatchEvent(new Event("input"));
+      inp.dispatchEvent(new Event("change"));
+    }
+    const well = root.querySelector('.cwell[data-for="' + id + '"]');
+    if (well) well.style.setProperty("--c", h);
+  }
+  // Aggiorna input nascosto + pastiglia SENZA emettere eventi (per i
+  // caricamenti: non deve far scattare i salvataggi in ascolto).
+  _syncColor(id, hex) {
+    const root = this.shadowRoot;
+    const inp = root.getElementById(id);
+    const h = "#" + String(hex == null ? "ffffff" : hex).replace("#", "");
+    if (inp) inp.value = h;
+    const well = root.querySelector('.cwell[data-for="' + id + '"]');
+    if (well) well.style.setProperty("--c", h);
+  }
+  _hex2rgb(h) {
+    h = String(h || "ffffff").replace("#", "");
+    if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+    const n = parseInt(h, 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  _rgb2hex(r, g, b) {
+    const c = (v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0");
+    return c(r) + c(g) + c(b);
+  }
+  _rgb2hsv(r, g, b) {
+    r /= 255; g /= 255; b /= 255;
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+    let h = 0;
+    if (d) {
+      if (mx === r) h = ((g - b) / d) % 6;
+      else if (mx === g) h = (b - r) / d + 2;
+      else h = (r - g) / d + 4;
+      h *= 60; if (h < 0) h += 360;
+    }
+    return [h, mx ? d / mx : 0, mx];
+  }
+  _hsv2rgb(h, s, v) {
+    const c = v * s, x = c * (1 - Math.abs(((h / 60) % 2) - 1)), m = v - c;
+    let r = 0, g = 0, b = 0;
+    if (h < 60) { r = c; g = x; } else if (h < 120) { r = x; g = c; }
+    else if (h < 180) { g = c; b = x; } else if (h < 240) { g = x; b = c; }
+    else if (h < 300) { r = x; b = c; } else { r = c; b = x; }
+    return [(r + m) * 255, (g + m) * 255, (b + m) * 255];
+  }
+  _drawWheel(canvas, v) {
+    const d = canvas.width, rad = d / 2, img = canvas.getContext("2d").createImageData(d, d);
+    const data = img.data;
+    for (let y = 0; y < d; y++) {
+      for (let x = 0; x < d; x++) {
+        const dx = x - rad, dy = y - rad, dist = Math.sqrt(dx * dx + dy * dy);
+        const i = (y * d + x) * 4;
+        if (dist > rad) { data[i + 3] = 0; continue; }
+        let h = Math.atan2(dy, dx) * 180 / Math.PI; if (h < 0) h += 360;
+        const s = Math.min(1, dist / rad);
+        const [r, g, b] = this._hsv2rgb(h, s, v);
+        data[i] = r; data[i + 1] = g; data[i + 2] = b; data[i + 3] = 255;
+      }
+    }
+    canvas.getContext("2d").putImageData(img, 0, 0);
+  }
+  _openColorWheel(well) {
+    const id = well.dataset.for;
+    const inp = this.shadowRoot.getElementById(id);
+    const startHex = (inp && inp.value) || "#ffffff";
+    let [h, s, v] = this._rgb2hsv(...this._hex2rgb(startHex));
+
+    const back = document.createElement("div");
+    back.className = "cw-back";
+    back.innerHTML = `
+      <div class="cw-card">
+        <h3>Scegli il colore</h3>
+        <div class="cw-wrap">
+          <canvas class="cw-wheel" width="200" height="200"></canvas>
+          <div class="cw-cur"></div>
+        </div>
+        <input type="range" class="cw-val" min="0" max="100" step="1">
+        <div class="cw-val-lab"><span class="cw-prev"></span>Luminosità
+          <span class="cw-hex"></span></div>
+        <div class="cw-act">
+          <button class="btn sec" data-a="cancel">Annulla</button>
+          <button class="btn" data-a="ok">Imposta</button>
+        </div>
+      </div>`;
+    this.shadowRoot.appendChild(back);
+
+    const wrap = back.querySelector(".cw-wrap");
+    const canvas = back.querySelector(".cw-wheel");
+    const cur = back.querySelector(".cw-cur");
+    const val = back.querySelector(".cw-val");
+    const prev = back.querySelector(".cw-prev");
+    const hexL = back.querySelector(".cw-hex");
+    val.value = Math.round(v * 100);
+
+    const curHex = () => {
+      const [r, g, b] = this._hsv2rgb(h, s, v);
+      return this._rgb2hex(r, g, b);
+    };
+    const paint = (redrawWheel) => {
+      if (redrawWheel) this._drawWheel(canvas, v);
+      const rad = wrap.clientWidth / 2;
+      const ang = h * Math.PI / 180, dist = s * rad;
+      cur.style.left = (rad + Math.cos(ang) * dist) + "px";
+      cur.style.top = (rad + Math.sin(ang) * dist) + "px";
+      const [fr, fg, fb] = this._hsv2rgb(h, 1, 1);
+      val.style.setProperty("--vc", "rgb(" + fr + "," + fg + "," + fb + ")");
+      const hx = curHex();
+      prev.style.setProperty("--pc", "#" + hx);
+      hexL.textContent = "#" + hx.toUpperCase();
+    };
+    this._drawWheel(canvas, v);
+    // primo posizionamento dopo il layout (clientWidth pronto)
+    requestAnimationFrame(() => paint(false));
+
+    const pick = (ev) => {
+      const r = wrap.getBoundingClientRect();
+      const rad = r.width / 2;
+      const px = (ev.touches ? ev.touches[0].clientX : ev.clientX) - r.left - rad;
+      const py = (ev.touches ? ev.touches[0].clientY : ev.clientY) - r.top - rad;
+      let ang = Math.atan2(py, px) * 180 / Math.PI; if (ang < 0) ang += 360;
+      h = ang;
+      s = Math.min(1, Math.sqrt(px * px + py * py) / rad);
+      paint(false);
+    };
+    let dragging = false;
+    const down = (ev) => { dragging = true; pick(ev); ev.preventDefault(); };
+    const move = (ev) => { if (dragging) { pick(ev); ev.preventDefault(); } };
+    const up = () => { dragging = false; };
+    wrap.addEventListener("pointerdown", down);
+    wrap.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    val.addEventListener("input", () => { v = parseInt(val.value, 10) / 100; paint(true); });
+
+    const close = () => {
+      window.removeEventListener("pointerup", up);
+      back.remove();
+    };
+    back.addEventListener("click", (ev) => {
+      if (ev.target === back) close();
+      const a = ev.target.closest && ev.target.closest("[data-a]");
+      if (!a) return;
+      if (a.dataset.a === "ok") this._setColorField(id, curHex());
+      close();
+    });
   }
 
   set hass(hass) {
@@ -360,6 +533,40 @@ class IPixelPanel extends HTMLElement {
         text-overflow:ellipsis; white-space:nowrap; }
       .ec-dom { font-size:11px; color:var(--muted); flex:none; align-self:center; }
       .ec-empty { padding:16px; text-align:center; color:var(--muted); font-size:13px; }
+      /* --- selettore colore a ruota (stile HA) --- */
+      .cwell { width:40px; height:30px; border-radius:8px; cursor:pointer; flex:none;
+        border:2px solid #ffffff55; background:var(--c,#fff);
+        box-shadow:0 0 0 1px #0006 inset, 0 1px 4px #0007; padding:0; }
+      .cwell:active { transform:scale(.96); }
+      .cw-back { position:fixed; inset:0; z-index:200; background:#000a;
+        display:flex; align-items:center; justify-content:center; padding:18px;
+        -webkit-backdrop-filter:blur(2px); backdrop-filter:blur(2px); }
+      .cw-card { width:min(340px,94vw); background:#0b1322;
+        border:1px solid var(--neon); border-radius:16px; padding:18px;
+        box-shadow:0 20px 50px #000c, 0 0 18px #0ff3; }
+      .cw-card h3 { margin:0 0 14px; font-size:17px; color:#eaf6ff; font-weight:600; }
+      .cw-wrap { position:relative; width:min(260px,78vw); aspect-ratio:1;
+        margin:0 auto 14px; touch-action:none; }
+      .cw-wheel { width:100%; height:100%; border-radius:50%; display:block;
+        box-shadow:0 0 0 1px #0008 inset; }
+      .cw-cur { position:absolute; width:22px; height:22px; border-radius:50%;
+        border:3px solid #fff; box-shadow:0 0 0 1.5px #0009, 0 2px 6px #0008;
+        transform:translate(-50%,-50%); pointer-events:none; }
+      .cw-val { width:100%; height:26px; border-radius:13px; margin:2px 0 6px;
+        -webkit-appearance:none; appearance:none; outline:none;
+        background:linear-gradient(90deg,#000,var(--vc,#fff)); cursor:pointer; }
+      .cw-val::-webkit-slider-thumb { -webkit-appearance:none; width:24px; height:24px;
+        border-radius:50%; background:#fff; border:2px solid #0008;
+        box-shadow:0 1px 5px #0009; cursor:pointer; }
+      .cw-val::-moz-range-thumb { width:22px; height:22px; border-radius:50%;
+        background:#fff; border:2px solid #0008; cursor:pointer; }
+      .cw-val-lab { display:flex; align-items:center; gap:8px; color:var(--muted);
+        font-size:12px; margin-bottom:12px; }
+      .cw-hex { margin-left:auto; font-variant-numeric:tabular-nums; color:#cdeeff;
+        font-size:13px; letter-spacing:.5px; }
+      .cw-prev { width:26px; height:26px; border-radius:7px; border:2px solid #fff6;
+        background:var(--pc,#fff); flex:none; }
+      .cw-act { display:flex; justify-content:flex-end; gap:10px; }
       .gal-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:10px; }
       .gal-tile { background:#000; border:1px solid var(--line); border-radius:10px;
         padding:6px; cursor:pointer; transition:transform .12s, box-shadow .15s; }
@@ -975,9 +1182,9 @@ class IPixelPanel extends HTMLElement {
           <button class="chip mode-chip" data-v="textimage">Adattato</button></div></div>
         <div class="row"><label>Font</label><select id="font">${fontOpts}</select></div>
         <div class="row"><label>Colore testo</label>
-          <input type="color" id="tx-color">
+          ${this._colorField("tx-color", "ffffff")}
           <label style="min-width:auto">Sfondo</label>
-          <input type="color" id="tx-bg"></div>
+          ${this._colorField("tx-bg", "000000")}</div>
         <div class="row"><label>Grandezza</label>
           <input type="range" id="fsize" min="0" max="16" step="1">
           <span class="num" id="fsize-v"></span></div>
@@ -1151,11 +1358,14 @@ class IPixelPanel extends HTMLElement {
     const libOpts = (this._libItems || [])
       .map((it, i) => `<option value="${it.file}">Immagine ${i + 1}</option>`).join("");
     box.innerHTML = pl.map((s, i) => {
-      const unitEnt = s.type === "sensors"
-        ? `<option value="ent">sec. a entità</option>` : "";
       let val = s.seconds, unit = "1";
       if (s.per_ent) { unit = "ent"; }
       else if (s.seconds % 60 === 0 && s.seconds >= 60) { val = s.seconds / 60; unit = "60"; }
+      // marca come SELEZIONATA l'unità salvata, se no al ridisegno
+      // (cambio pagina) il menù torna sempre su "secondi"
+      const sel = (v) => unit === v ? " selected" : "";
+      const unitEnt = s.type === "sensors"
+        ? `<option value="ent"${sel("ent")}>sec. a entità</option>` : "";
       const fileSel = s.type === "image"
         ? `<select class="pl-file" data-i="${i}" style="min-width:130px">
              ${this._galleryOptions()}${libOpts ? `<optgroup label="Le mie immagini">${libOpts}</optgroup>` : ""}
@@ -1169,8 +1379,8 @@ class IPixelPanel extends HTMLElement {
         <input class="pl-sec" data-i="${i}" type="text" inputmode="numeric"
           value="${val}" style="max-width:70px;flex:none">
         <select class="pl-unit" data-i="${i}" style="flex:none;min-width:105px">
-          <option value="1">secondi</option>
-          <option value="60">minuti</option>
+          <option value="1"${sel("1")}>secondi</option>
+          <option value="60"${sel("60")}>minuti</option>
           ${unitEnt}
         </select>
         <button class="chip pl-up" data-i="${i}" title="Sposta su">▲</button>
@@ -1324,7 +1534,7 @@ class IPixelPanel extends HTMLElement {
         <canvas id="paint" class="preview" style="width:100%;max-width:720px;touch-action:none;cursor:crosshair"></canvas>
         <div class="row" style="margin-top:12px">
           <div class="swatches">${palette}</div>
-          <input type="color" id="dr-color" value="#19e5ff" title="Colore personalizzato">
+          ${this._colorField("dr-color", "19e5ff")}
         </div>
         <div class="row">
           <button class="chip" id="dr-pen">🖌️ Pennello</button>
@@ -1452,19 +1662,28 @@ class IPixelPanel extends HTMLElement {
             <option value="n">N — Cielo stellato</option>
             <option value="o">O — Ora + icona a scelta</option>
           </select></div>
+        <div class="row"><label>Colore</label>
+          ${this._colorField("clock-it-color", "ffffff")}
+          <span style="color:var(--muted);font-size:12px">colore di giorno e ora</span></div>
         <div class="row"><label>Grandezza</label>
           <input type="range" id="clk-size" min="5" max="16" step="1" value="7">
           <span class="num" id="clk-size-v">piccola</span></div>
         <div class="row"><label>Distanza</label>
           <input type="range" id="clk-gap" min="0" max="12" step="1" value="2">
           <span class="num" id="clk-gap-v">2</span></div>
+        <div class="row"><label>Grandezza giorno</label>
+          <select id="clk-day-size" style="flex:1;min-width:160px">
+            <option value="auto">Automatica</option>
+            <option value="1">Normale</option>
+            <option value="2">Grande</option>
+          </select></div>
         <p style="color:var(--muted);font-size:12px;margin:0 0 8px">
-          Grandezza (altezza in pixel, il display è alto 16) e distanza
-          valgono per lo <b>Stile A</b> (giorno + ora). Il giorno si
-          ingrandisce da solo quando c'è spazio.</p>
+          Grandezza (altezza in pixel, il display è alto 16), distanza e
+          grandezza del giorno valgono per lo <b>Stile A</b> (giorno + ora).
+          Con "Automatica" il giorno si ingrandisce da solo quando c'è spazio.</p>
         <div class="row"><label>Icona (stile O)</label>
           <input type="text" id="clock-icon" placeholder="es. heart o 😍" style="max-width:140px">
-          <input type="color" id="clock-icon-color" value="#ff0000"></div>
+          ${this._colorField("clock-icon-color", "ff0000")}</div>
         <p style="color:var(--muted);font-size:12px;margin:0 0 6px">
           Nome Material Design (<i>heart</i>, <i>home</i>…) o un'emoji.
           Toccandola lo stile passa da solo a O, l'unico che la mostra.</p>
@@ -1535,12 +1754,12 @@ class IPixelPanel extends HTMLElement {
       <div class="card">
         <h2>Colore del testo</h2>
         <div class="row"><div class="swatches" id="sw-text">${palette}</div></div>
-        <div class="row"><label>Personalizzato</label><input type="color" id="col-text"></div>
+        <div class="row"><label>Personalizzato</label>${this._colorField("col-text", "ffffff")}</div>
       </div>
       <div class="card">
         <h2>Colore dello sfondo</h2>
         <div class="row"><div class="swatches" id="sw-bg">${mk("#000000")}${palette}</div></div>
-        <div class="row"><label>Personalizzato</label><input type="color" id="col-bg"></div>
+        <div class="row"><label>Personalizzato</label>${this._colorField("col-bg", "000000")}</div>
       </div>
       <div class="card">
         <h2>Luminosità</h2>
@@ -2120,7 +2339,7 @@ class IPixelPanel extends HTMLElement {
       const hasBelow = !!(it.below && it.below.entity_id);
       const bdec = it.below && it.below.decimals != null ? it.below.decimals : 1;
       slot.innerHTML = `<div class="editor">${close}${preview}
-        <div class="edsec open" data-sec="s1">
+        <div class="edsec" data-sec="s1">
           <button type="button" class="edsec-h">🌡️ 1° sensore</button>
           <div class="edsec-b">
             <div class="row"><label>Sensore</label>
@@ -2128,8 +2347,7 @@ class IPixelPanel extends HTMLElement {
             <div class="row"><label>Etichetta</label>
               <input type="text" id="ed-label" value="${(it.label || "").replace(/"/g, "&quot;")}"></div>
             <div class="row"><label>Colore</label>
-              <input type="color" id="ed-color"
-                value="${it.color ? "#" + String(it.color).replace("#", "") : "#ffffff"}">
+              ${this._colorField("ed-color", it.color || "ffffff")}
               <button class="chip" id="ed-color-auto">Generale</button></div>
             <div class="row"><label>Decimali</label><div class="chips">
               <button class="chip dec-chip" data-v="0">0</button>
@@ -2150,7 +2368,7 @@ class IPixelPanel extends HTMLElement {
               <span class="num" id="ed-icon-gap-v">${it.icon_gap == null ? "normale" : it.icon_gap}</span></div>
           </div>
         </div>
-        <div class="edsec ${hasBelow ? "open" : ""}" data-sec="s2">
+        <div class="edsec" data-sec="s2">
           <button type="button" class="edsec-h">💧 2° sensore (sotto)${hasBelow ? " •" : ""}</button>
           <div class="edsec-b">
             <div class="row"><label>Sensore</label>
@@ -2160,8 +2378,7 @@ class IPixelPanel extends HTMLElement {
               Impilato <b>sotto</b> il primo, nello stesso spazio che scorre.
               Con un 2° sensore grandezza/posizione non si applicano.</p>
             <div class="row"><label>Colore</label>
-              <input type="color" id="ed-below-color"
-                value="${it.below && it.below.color ? "#" + String(it.below.color).replace("#", "") : "#00c8ff"}"></div>
+              ${this._colorField("ed-below-color", (it.below && it.below.color) || "00c8ff")}</div>
             <div class="row"><label>Decimali</label><div class="chips">
               <button class="chip dec2-chip" data-v="0">0</button>
               <button class="chip dec2-chip" data-v="1">1</button>
@@ -2175,6 +2392,10 @@ class IPixelPanel extends HTMLElement {
                 placeholder="auto">
               <button class="chip" id="ed-below-icon-auto">Auto</button>
               <button class="chip" id="ed-below-icon-none">Niente</button></div>
+            <div class="row"><label>Distanza icona</label>
+              <input type="range" id="ed-below-icon-gap" min="0" max="5" step="1"
+                value="${it.below && it.below.icon_gap != null ? it.below.icon_gap : 1}">
+              <span class="num" id="ed-below-icon-gap-v">${it.below && it.below.icon_gap != null ? it.below.icon_gap : "normale"}</span></div>
           </div>
         </div>
         <div class="edsec" data-sec="s3">
@@ -2193,12 +2414,10 @@ class IPixelPanel extends HTMLElement {
                 value="${it.gap == null ? 2 : it.gap}">
               <span class="num" id="ed-gap-v">${it.gap == null ? "normale" : it.gap}</span></div>
             <div class="row"><label>Colore cornice</label>
-              <input type="color" id="ed-tile-border"
-                value="${it.tile_border ? "#" + String(it.tile_border).replace("#", "") : "#19e5ff"}">
+              ${this._colorField("ed-tile-border", it.tile_border || "19e5ff")}
               <button class="chip" id="ed-tile-border-def">Default</button></div>
             <div class="row"><label>Colore nome</label>
-              <input type="color" id="ed-tile-name"
-                value="${it.tile_name ? "#" + String(it.tile_name).replace("#", "") : "#cdeeff"}">
+              ${this._colorField("ed-tile-name", it.tile_name || "cdeeff")}
               <button class="chip" id="ed-tile-name-def">Default</button></div>
             <p style="color:var(--muted);font-size:12px;margin:2px 0 0">
               Cornice e nome: solo l'aspetto della piastrella nel pannello,
@@ -2253,6 +2472,17 @@ class IPixelPanel extends HTMLElement {
         slot.querySelector("#ed-below-icon-none").addEventListener("click", () => setBelowDeep(() => {
           it.below.icon = ""; bIcon.value = "";
         }));
+      }
+      const bgap = slot.querySelector("#ed-below-icon-gap");
+      if (bgap) {
+        bgap.addEventListener("input", (e) => {
+          if (!it.below) return;
+          it.below.icon_gap = parseInt(e.target.value, 10);
+          const g = slot.querySelector("#ed-below-icon-gap-v");
+          if (g) g.textContent = it.below.icon_gap;
+          this._editorPreview(it);  // anteprima singola dal vivo
+        });
+        bgap.addEventListener("change", () => setBelowDeep(() => {}));
       }
       // colore cornice/nome della piastrella (solo aspetto del pannello)
       const tbord = slot.querySelector("#ed-tile-border");
@@ -2540,14 +2770,16 @@ class IPixelPanel extends HTMLElement {
     if (!this._dev) return;
 
     // Sezioni richiudibili: clic sul titolo piega/espande la card.
-    // Lo stato (per titolo) resta durante la sessione.
-    this._collapsed = this._collapsed || new Set();
+    // Partono CHIUSE a ogni caricamento (dopo un riavvio/ricarica sono
+    // chiuse); si ricorda solo quali hai aperto durante la sessione,
+    // così cambiando pagina e tornando restano come le hai lasciate.
+    this._opened = this._opened || new Set();
     this.shadowRoot.querySelectorAll(".card > h2").forEach((h) => {
       const key = h.textContent.trim();
-      if (this._collapsed.has(key)) h.parentElement.classList.add("collapsed");
+      if (!this._opened.has(key)) h.parentElement.classList.add("collapsed");
       h.addEventListener("click", () => {
-        const on = h.parentElement.classList.toggle("collapsed");
-        if (on) this._collapsed.add(key); else this._collapsed.delete(key);
+        const collapsed = h.parentElement.classList.toggle("collapsed");
+        if (collapsed) this._opened.delete(key); else this._opened.add(key);
       });
     });
 
@@ -2799,7 +3031,7 @@ class IPixelPanel extends HTMLElement {
       });
       this.shadowRoot.querySelectorAll(".dr-sw").forEach((s) =>
         s.addEventListener("click", () => {
-          this._drawColor = s.dataset.c; $("dr-color").value = s.dataset.c; setTool("pen");
+          this._drawColor = s.dataset.c; this._syncColor("dr-color", s.dataset.c); setTool("pen");
         }));
       $("dr-live").addEventListener("change", async () => {
         const on = $("dr-live").checked;
@@ -2973,7 +3205,8 @@ class IPixelPanel extends HTMLElement {
       }).then((st) => {
         if (st.clock_style) $("clock-it-style").value = st.clock_style;
         if (st.clock_icon) $("clock-icon").value = st.clock_icon;
-        if (st.clock_icon_color) $("clock-icon-color").value = "#" + st.clock_icon_color;
+        if (st.clock_icon_color) this._syncColor("clock-icon-color", st.clock_icon_color);
+        if (st.clock_color) this._syncColor("clock-it-color", st.clock_color);
         this._clkSize = sizeToPx(st.clock_size);
         if ($("clk-size")) {
           $("clk-size").value = this._clkSize;
@@ -2983,6 +3216,8 @@ class IPixelPanel extends HTMLElement {
           $("clk-gap").value = st.clock_gap == null ? 2 : st.clock_gap;
           $("clk-gap-v").textContent = $("clk-gap").value;
         }
+        if ($("clk-day-size"))
+          $("clk-day-size").value = st.clock_day_size ? String(st.clock_day_size) : "auto";
       }).catch(() => {});
       const saveClockStyle = async () => {
         // Ricorda subito la scelta (vale anche per la fase orologio
@@ -2993,8 +3228,10 @@ class IPixelPanel extends HTMLElement {
             clock_style: $("clock-it-style").value,
             icon: ($("clock-icon").value || "heart").trim(),
             icon_color: $("clock-icon-color").value.slice(1),
+            color: ($("clock-it-color") ? $("clock-it-color").value.slice(1) : "ffffff"),
             size: parseInt(this._clkSize, 10) || 7,
             gap: parseInt(($("clk-gap") && $("clk-gap").value) || "2", 10) || 0,
+            day_size: ($("clk-day-size") ? $("clk-day-size").value : "auto"),
           });
         } catch (e) { /* server vecchio: lo salva comunque l'avvio */ }
         // Se l'orologio è in moto, riparte subito con le scelte nuove
@@ -3021,6 +3258,8 @@ class IPixelPanel extends HTMLElement {
       };
       $("clock-icon").addEventListener("change", saveWithStyleO);
       $("clock-icon-color").addEventListener("change", saveWithStyleO);
+      if ($("clock-it-color"))
+        $("clock-it-color").addEventListener("change", saveClockStyle);
       if ($("clk-size")) {
         $("clk-size").addEventListener("input", () => {
           this._clkSize = parseInt($("clk-size").value, 10);
@@ -3034,6 +3273,8 @@ class IPixelPanel extends HTMLElement {
         });
         $("clk-gap").addEventListener("change", saveClockStyle);
       }
+      if ($("clk-day-size"))
+        $("clk-day-size").addEventListener("change", saveClockStyle);
     }
 
     // --- Immagine: memoria del display (slot di bordo)
@@ -3447,7 +3688,12 @@ class IPixelPanel extends HTMLElement {
       const el = $(id);
       // shadowRoot.activeElement: document.activeElement nello shadow DOM
       // restituisce l'host, mai l'input, e la guardia non scattava mai
-      if (el && this.shadowRoot.activeElement !== el && el.value !== String(v)) el.value = v;
+      if (el && this.shadowRoot.activeElement !== el && el.value !== String(v)) {
+        el.value = v;
+        // se e' un campo colore, aggiorna anche la pastiglia
+        const well = this.shadowRoot.querySelector('.cwell[data-for="' + id + '"]');
+        if (well) well.style.setProperty("--c", "#" + String(v).replace("#", ""));
+      }
     };
     const chkIf = (id, on) => { const el = $(id); if (el) el.checked = on; };
     const chipSel = (cls, v) =>
