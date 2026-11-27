@@ -46,6 +46,12 @@ _MIN_CHUNK = 20
 # Never exceed this per write even when the MTU allows more; keeps the
 # ESPHome proxy write queue happy.
 _MAX_CHUNK = 244
+# Quanto aspettare che l'adattatore SCELTO senta il display prima di
+# ripiegare su un altro (dopo una disconnessione servono alcuni secondi)
+_PREF_WAIT = 12.0
+# Ogni quanto riprovare a tornare sull'adattatore scelto dopo un ripiego
+_RETURN_MIN = 300.0
+_RETURN_MAX = 3600.0
 
 
 class BluetoothClient:
@@ -63,6 +69,11 @@ class BluetoothClient:
         # "Liberato per l'app": finche' il momento non passa, niente
         # connessioni ne' comandi, cosi' l'app del telefono puo' agganciarsi
         self._released_until: float = 0.0
+        # Adattatore su cui passa il collegamento attuale (None = ripiego
+        # automatico) e prossimo tentativo di tornare su quello scelto
+        self._via: str | None = None
+        self._next_return_try: float = 0.0
+        self._return_backoff: float = _RETURN_MIN
 
     @property
     def is_released(self) -> bool:
@@ -126,34 +137,43 @@ class BluetoothClient:
         self._notification_handler = notification_handler
 
         try:
-            ble_device = None
-            # Adattatore scelto dall'utente (select "Adattatore BLE"):
-            # se impostato, forza il collegamento via QUELLO (es. il
-            # Bluetooth del box invece di un proxy ESPHome che perde i
-            # pacchetti grandi). Se non è più in vista, ripiega su auto.
-            pref = (
-                self._hass.data.get(DOMAIN, {})
-                .get("pref_adapter", {})
-                .get(self._address)
-            )
-            if pref:
+            # Chiudi un client stantio PRIMA di cercare il display: un
+            # handle BLE lasciato appeso puo' esaurire gli slot del box e,
+            # finche' il vecchio collegamento resta su, il display non si
+            # annuncia (quindi l'adattatore scelto non lo vedrebbe mai)
+            if self._client is not None:
+                stale, self._client = self._client, None
                 try:
-                    for d in bluetooth.async_scanner_devices_by_address(
-                        self._hass, self._address, connectable=True
-                    ):
-                        if scanner_label(d.scanner) == pref:
-                            ble_device = d.ble_device
-                            _LOGGER.info(
-                                "Collegamento forzato via adattatore '%s'", pref
-                            )
-                            break
-                    else:
-                        _LOGGER.warning(
-                            "Adattatore scelto '%s' non in vista: uso automatico",
-                            pref,
-                        )
-                except Exception as err:  # pragma: no cover - best effort
-                    _LOGGER.debug("Scelta adattatore fallita (%s): auto", err)
+                    await stale.disconnect()
+                except Exception:  # pragma: no cover - best effort
+                    pass
+
+            ble_device = None
+            self._via = None
+            # Adattatore scelto dall'utente (select "Adattatore BLE"):
+            # se impostato, forza il collegamento via QUELLO. Subito dopo
+            # una disconnessione (o un riavvio) il proxy non ha ancora
+            # sentito l'annuncio del display, mentre il Bluetooth del box
+            # ce l'ha in cache: senza attesa si ricadeva SEMPRE sul box,
+            # anche con segnale pessimo. Quindi si aspetta qualche secondo
+            # che l'adattatore scelto lo veda, e solo dopo si ripiega.
+            pref = self._preferred_adapter()
+            if pref:
+                ble_device = self._device_via(pref)
+                if ble_device is None:
+                    deadline = self._hass.loop.time() + _PREF_WAIT
+                    while ble_device is None and self._hass.loop.time() < deadline:
+                        await asyncio.sleep(0.5)
+                        ble_device = self._device_via(pref)
+                if ble_device is not None:
+                    self._via = pref
+                    self._return_backoff = _RETURN_MIN
+                    _LOGGER.info("Collegamento forzato via adattatore '%s'", pref)
+                else:
+                    _LOGGER.warning(
+                        "Adattatore scelto '%s' non in vista dopo %ds: uso automatico",
+                        pref, int(_PREF_WAIT),
+                    )
 
             if ble_device is None:
                 ble_device = bluetooth.async_ble_device_from_address(
@@ -166,15 +186,6 @@ class BluetoothClient:
                     "Ensure the device is powered on and in range."
                 )
 
-            # Chiudi un client stantio prima di crearne uno nuovo: un
-            # handle BLE lasciato appeso puo' esaurire gli slot del box
-            if self._client is not None:
-                stale, self._client = self._client, None
-                try:
-                    await stale.disconnect()
-                except Exception:  # pragma: no cover - best effort
-                    pass
-
             self._client = await establish_connection(
                 BleakClientWithServiceCache,
                 ble_device,
@@ -184,6 +195,12 @@ class BluetoothClient:
             )
 
             self._connected = True
+            if pref and self._via != pref:
+                # Ripiego: piu' tardi si riprova a tornare sull'adattatore
+                # scelto (vedi _maybe_return_to_preferred)
+                self._next_return_try = (
+                    self._hass.loop.time() + self._return_backoff
+                )
 
             # Start notifications exactly once per connection. If a stale
             # session is still around (e.g. after an unclean disconnect
@@ -245,6 +262,61 @@ class BluetoothClient:
                 self._connected = False
                 self._client = None
 
+    def _preferred_adapter(self) -> str | None:
+        """Adattatore scelto nel select "Adattatore BLE" (None = automatico)."""
+        return (
+            self._hass.data.get(DOMAIN, {})
+            .get("pref_adapter", {})
+            .get(self._address)
+        )
+
+    def _device_via(self, label: str) -> Any:
+        """BLEDevice del display visto dall'adattatore `label`, o None."""
+        try:
+            for d in bluetooth.async_scanner_devices_by_address(
+                self._hass, self._address, connectable=True
+            ):
+                if scanner_label(d.scanner) == label:
+                    return d.ble_device
+        except Exception as err:  # pragma: no cover - best effort
+            _LOGGER.debug("Ricerca adattatore fallita (%s)", err)
+        return None
+
+    def _adapter_online(self, label: str) -> bool:
+        """True se l'adattatore/proxy `label` e' attivo in Home Assistant."""
+        try:
+            current = getattr(bluetooth, "async_current_scanners", None)
+            if current is None:
+                return True
+            return any(scanner_label(s) == label for s in current(self._hass))
+        except Exception:  # pragma: no cover - best effort
+            return True
+
+    async def _maybe_return_to_preferred(self) -> None:
+        """Se il collegamento e' finito su un adattatore di ripiego, ogni
+        tanto lo molla per riagganciarsi a quello scelto.
+
+        Mentre e' collegato il display non si annuncia, quindi l'adattatore
+        scelto non puo' "vederlo": l'unico modo e' staccare e ricollegare
+        (connect() aspetta che l'adattatore scelto lo senta). Se non ci
+        riesce l'intervallo raddoppia, fino a un'ora, per non disturbare.
+        """
+        pref = self._preferred_adapter()
+        if not pref or self._via == pref or not self.is_connected:
+            return
+        now = self._hass.loop.time()
+        if now < self._next_return_try:
+            return
+        self._next_return_try = now + self._return_backoff
+        if not self._adapter_online(pref):
+            return
+        self._return_backoff = min(self._return_backoff * 2, _RETURN_MAX)
+        self._next_return_try = now + self._return_backoff
+        _LOGGER.info(
+            "Collegato via adattatore di ripiego: riprovo con '%s'", pref
+        )
+        await self.disconnect()
+
     async def _ensure_connected(self) -> None:
         """Reconnect if the link dropped."""
         if self.is_connected:
@@ -285,6 +357,10 @@ class BluetoothClient:
             _LOGGER.debug("Comando saltato: collegamento liberato per l'app")
             return (False, None) if return_response else False
         async with self._lock:
+            try:
+                await self._maybe_return_to_preferred()
+            except Exception as err:  # pragma: no cover - mai bloccare l'invio
+                _LOGGER.debug("Ritorno all'adattatore scelto fallito: %s", err)
             total = len(command)
             # Frame GRANDE (composizione sensori ~12 KB): parte già in
             # modalità gentile — conferma OGNI pacchetto (l'ATT fa da
@@ -306,7 +382,10 @@ class BluetoothClient:
                     # Timeout sulla riconnessione: il backoff di
                     # establish_connection, tenuto dentro il lock, può
                     # bloccare ogni invio per minuti se il device è muto.
-                    await asyncio.wait_for(self._ensure_connected(), timeout=20.0)
+                    # (comprende l'attesa _PREF_WAIT dell'adattatore scelto)
+                    await asyncio.wait_for(
+                        self._ensure_connected(), timeout=20.0 + _PREF_WAIT
+                    )
                 except (iPIXELConnectionError, asyncio.TimeoutError) as err:
                     _LOGGER.warning(
                         "Riconnessione fallita: %s", err or "timeout"
